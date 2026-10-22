@@ -1,0 +1,18 @@
+{
+  "include": ["src", "tests"],
+  "exclude": [".venv"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "reportAttributeAccessIssue": "none",
+      "reportFunctionMemberAccess": "none",
+      "reportOptionalMemberAccess": "none",
+      "reportArgumentType": "none",
+      "reportCallIssue": "none"
+    },
+    { "root": "." }
+  ]
+}

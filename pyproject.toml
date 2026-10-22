@@ -1,0 +1,125 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bigfix-actionscript-runner"
+version = "0.1.0"
+description = "Run BigFix ActionScript from a .bes file the way a client would: real client relevance substitution via qna, locally or over SSH, with the client folders sandboxed."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "JGStew", email = "admin@jgstew.com" },
+]
+requires-python = ">=3.11"
+keywords = ["bigfix", "actionscript", "qna", "client-relevance", "ssh", "testing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Systems Administration",
+  "Typing :: Typed",
+]
+dependencies = [
+  "asyncssh>=2.14",
+  "bigfix-prefetch>=1.1.5,<2",
+  "bigfix-relevance-analyzer>=1.38,<2",
+  "bigfix-remote-client-relevance>=1.6.2,<2",
+  "platformdirs>=4",
+  # Not on PyPI yet, and PyPI rejects packages with direct URL dependencies:
+  # https://github.com/jgstew/pre-commit-bigfix/issues/46
+  "pre-commit-bigfix @ git+https://github.com/jgstew/pre-commit-bigfix",
+  "requests>=2.31",
+  "typer>=0.12",
+]
+
+# Dev tooling lives in a PEP 735 dependency group, which `uv sync` installs by
+# default — an optional-dependencies extra would need `--extra dev` every time.
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+  "pytest-xdist>=3.8.0",
+  "pyright>=1.1.400",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "types-requests",
+]
+
+[project.scripts]
+bigfix-actionscript-runner = "bigfix_actionscript_runner.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jgstew/bigfix-actionscript-runner"
+Issues   = "https://github.com/jgstew/bigfix-actionscript-runner/issues"
+Source   = "https://github.com/jgstew/bigfix-actionscript-runner"
+
+# --- Build backend ---------------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bigfix_actionscript_runner"]
+
+[tool.hatch.metadata]
+# for the pre-commit-bigfix git dependency (see dependencies)
+allow-direct-references = true
+
+# --- uv --------------------------------------------------------------------
+
+[tool.uv]
+python-preference = "managed"
+# Supply-chain quarantine: ignore any distribution uploaded in the last 7
+# days, same as bigfix-remote-client-relevance. Overridable per run
+# (`--exclude-newer`) or per package (`exclude-newer-package`).
+exclude-newer = "-P7D"
+# Sibling packages by the same maintainer released inside the window. The
+# fixed date lifts the quarantine for those releases only; remove each once
+# the rolling window has passed it (after 2026-10-29), or it would hold the
+# package back from then on.
+exclude-newer-package = { bigfix-remote-client-relevance = "2026-10-22T00:00:00Z", bigfix-remote-session-relevance = "2026-10-22T00:00:00Z", bigfix-relevance-analyzer = "2026-10-22T00:00:00Z" }
+
+# --- Tooling ---------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests are isolated (per-test tmp_path), so fanning out across workers is safe.
+addopts = "-n auto"
+# Everything unmarked runs offline on a bare machine. Marked tests need a real
+# prerequisite and are auto-skipped by tests/conftest.py when it is absent.
+markers = [
+  "live_qna: needs a real local qna binary (root on macOS: sudo -E uv run pytest -m live_qna)",
+  "ssh_posix: needs a real macOS/Linux SSH target (set BFASR_SSH_POSIX_HOST=user@host)",
+  "ssh_windows: needs a real Windows SSH target (set BFASR_SSH_WINDOWS_HOST=user@host)",
+  "network: downloads from the internet (opt in with BFASR_NETWORK_TESTS=1)",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# T20 (flake8-print): stdout belongs to cli.py (the trace or the --json
+# payload); everything else logs.
+extend-select = ["T20", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/bigfix_actionscript_runner/cli.py" = ["T20"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+# None of these ship type information.
+[[tool.mypy.overrides]]
+module = ["bigfix_prefetch.*", "pre_commit_bigfix.*", "bigfix_relevance_analyzer.*"]
+ignore_missing_imports = true

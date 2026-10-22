@@ -1,0 +1,318 @@
+"""The command line, with the relevance evaluator replaced by a fake."""
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from bigfix_actionscript_runner import cli
+from bigfix_actionscript_runner.substitution import SubstitutionError
+
+runner = CliRunner()
+
+TASK = """<?xml version="1.0" encoding="UTF-8"?>
+<BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd">
+    <Task>
+        <Title>Demo Task</Title>
+        <Description>d</Description>
+        <Relevance>mac of operating system</Relevance>
+        <DefaultAction ID="Action1">
+            <Description><PreLink>a</PreLink><Link>b</Link><PostLink>c</PostLink></Description>
+            <ActionScript MIMEType="application/x-Fixlet-Windows-Shell"><![CDATA[
+parameter "logs" = "{pathname of data folder of client}/__Global/Logs"
+createfile until END
+hello from {name of operating system}
+END
+copy __createfile "{parameter "logs"}/hello.txt"
+wait /bin/echo done
+]]></ActionScript>
+        </DefaultAction>
+    </Task>
+</BES>
+"""
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    """Install a fake evaluator; returns the record of how it was built and called."""
+    record = {"built": None, "builds": [], "calls": []}
+
+    def build_evaluator(ssh, timeout_s, overrides, become=None):
+        built = {"ssh": ssh, "timeout_s": timeout_s, "overrides": overrides}
+        if become is not None:
+            built["become"] = become
+        record["builds"].append(built)
+        record["built"] = record["builds"][0]
+
+        def evaluate(expr):
+            record["calls"].append(expr)
+            if expr in overrides:
+                return [overrides[expr]]
+            m = re.fullmatch(r'"([^"]*)"', expr)
+            if m:
+                return [m.group(1)]
+            m = re.fullmatch(r'pathname of folder "([^"]*)"', expr)
+            if m:
+                return [m.group(1)]
+            answers = {"name of operating system": ["macOS"], "mac of operating system": ["True"]}
+            if expr in answers:
+                return answers[expr]
+            raise SubstitutionError(f'The operator "{expr}" is not defined.')
+
+        return evaluate
+
+    monkeypatch.setattr(cli, "build_evaluator", build_evaluator)
+    return record
+
+
+def write(tmp_path, name="t.bes", text=TASK):
+    p = tmp_path / name
+    p.write_text(text)
+    return p
+
+
+def test_simulates_a_task_into_the_sandbox(tmp_path, fake):
+    sb = tmp_path / "sb"
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--sandbox", str(sb)])
+    assert r.exit_code == 0, r.output
+    assert (
+        sb / "__BESData" / "__Global" / "Logs" / "hello.txt"
+    ).read_text() == "hello from macOS\n"
+    assert "Demo Task" in r.output
+    assert "Completed" in r.output
+    assert "/bin/echo done" in r.output
+    assert fake["built"]["ssh"] is None  # --local by default
+
+
+def test_text_trace_shows_sandbox_paths_short(tmp_path, fake):
+    sb = tmp_path / "sb"
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--sandbox", str(sb)])
+    steps = r.output.split("\n\n", 1)[1]  # after the header, which names the sandbox once
+    assert str(sb.resolve()) not in steps
+    assert "<sandbox>/__BESData/__Global/Logs/hello.txt" in steps
+
+
+def test_failed_action_exits_1_and_names_the_line(tmp_path, fake):
+    script = write(tmp_path, "a.bas", "delete a\ncopy {bogus} b\n")
+    r = runner.invoke(cli.app, [str(script), "--sandbox", str(tmp_path / "sb")])
+    assert r.exit_code == 1
+    assert "Failed at line 2" in r.output
+    assert "not defined" in r.output
+
+
+def test_preflight_errors_stop_before_anything_runs(tmp_path, fake):
+    script = write(tmp_path, "a.bas", "delete a\ncopy {pathname of (x} b\n")
+    r = runner.invoke(cli.app, [str(script), "--sandbox", str(tmp_path / "sb")])
+    assert r.exit_code == 3
+    assert "preflight" in r.output.lower()
+    assert fake["calls"] == []
+
+
+def test_no_preflight_runs_anyway(tmp_path, fake):
+    script = write(tmp_path, "a.bas", "delete a\ncopy {pathname of (x} b\n")
+    r = runner.invoke(cli.app, [str(script), "--no-preflight", "--sandbox", str(tmp_path / "sb")])
+    assert r.exit_code == 1  # qna (the fake) rejects it at run time instead
+
+
+def test_json_report(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--json", "--sandbox", str(tmp_path / "sb")])
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["status"] == "completed"
+    assert data["title"] == "Demo Task"
+    assert data["sandbox"] == str((tmp_path / "sb").resolve())
+    assert any(s["outcome"] == "shown" for s in data["steps"])
+    assert "preflight" in data
+
+
+def test_ssh_target_and_options_reach_the_evaluator(tmp_path, fake):
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path)),
+            "--ssh",
+            "jgstew@winbox",
+            "--timeout",
+            "15",
+            "--set",
+            "name of operating system=>Win2022",
+            "--sandbox",
+            str(tmp_path / "sb"),
+        ],
+    )
+    assert fake["builds"] == [
+        {
+            "ssh": "jgstew@winbox",
+            "timeout_s": 15.0,
+            "overrides": {"name of operating system": "Win2022"},
+        },
+        # plus a local evaluator for expressions about the sandbox, which the remote can't see
+        {"ssh": None, "timeout_s": 15.0, "overrides": {"name of operating system": "Win2022"}},
+    ]
+    assert "jgstew@winbox" in r.output
+
+
+def test_set_keeps_equals_signs_in_the_expression(tmp_path, fake):
+    runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path)),
+            "--set",
+            "exit code of action = 0=>True",
+            "--sandbox",
+            str(tmp_path / "sb"),
+        ],
+    )
+    assert fake["built"]["overrides"] == {"exit code of action = 0": "True"}
+
+
+def test_set_needs_the_arrow(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--set", "x=1"])
+    assert r.exit_code == 2
+
+
+def test_execute_with_ssh_is_refused(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--ssh", "h", "--execute"])
+    assert r.exit_code == 2
+    assert "--execute" in r.output
+
+
+def test_param_must_be_name_equals_value(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--param", "novalue"])
+    assert r.exit_code == 2
+
+
+def test_params_are_passed_to_action_parameter_query(tmp_path, fake):
+    script = write(
+        tmp_path,
+        "a.bas",
+        'action parameter query "x" with description "d"\ncreatefile until E\n{parameter "x"}\nE\n',
+    )
+    sb = tmp_path / "sb"
+    r = runner.invoke(cli.app, [str(script), "--param", "x=a=b", "--sandbox", str(sb)])
+    assert r.exit_code == 0, r.output
+    assert (sb / "site" / "__createfile").read_text() == "a=b\n"
+
+
+def test_relevance_flag_evaluates_the_items_relevance(tmp_path, fake):
+    r = runner.invoke(
+        cli.app, [str(write(tmp_path)), "--relevance", "--sandbox", str(tmp_path / "sb")]
+    )
+    assert r.exit_code == 0, r.output
+    assert "mac of operating system" in r.output
+    assert "True" in r.output
+
+
+def test_help_has_plain_on_switches(fake):
+    r = runner.invoke(cli.app, ["--help"])
+    assert r.exit_code == 0
+    for flag in ("--execute", "--no-download", "--no-preflight", "--relevance", "--json"):
+        assert flag in r.output
+    assert "--no-no-" not in r.output
+    assert "--no-execute" not in r.output
+
+
+def test_load_error_exits_2(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path, "x.bes", "<BES><Analysis/></BES>"))])
+    assert r.exit_code == 2
+
+
+def test_default_sandbox_is_created_and_reported(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    r = runner.invoke(cli.app, [str(write(tmp_path, "a.bas", "delete a\n"))])
+    assert r.exit_code == 0, r.output
+    assert "Sandbox:" in r.output
+
+
+def test_baseline_is_on_by_default_and_reported(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--json", "--sandbox", str(tmp_path / "sb")])
+    data = json.loads(r.output)
+    exprs = [b["expression"] for b in data["baseline"]]
+    assert "name of operating system" in exprs
+    # evaluated once for the baseline and again at its step
+    assert fake["calls"].count("name of operating system") == 2
+
+
+def test_no_baseline(tmp_path, fake):
+    r = runner.invoke(
+        cli.app,
+        [str(write(tmp_path)), "--json", "--no-baseline", "--sandbox", str(tmp_path / "sb")],
+    )
+    assert json.loads(r.output)["baseline"] == []
+    assert fake["calls"].count("name of operating system") == 1
+
+
+def test_parameters_set_later_are_deferred_in_the_baseline(tmp_path, fake):
+    script = write(
+        tmp_path, "a.bas", 'parameter "p" = "v"\ncreatefile until E\n{parameter "p"}\nE\n'
+    )
+    r = runner.invoke(cli.app, [str(script), "--sandbox", str(tmp_path / "sb")])
+    assert r.exit_code == 0, r.output
+    assert "Baseline: 1 expression(s), 0 error(s) before line 1, 1 deferred" in r.output
+    assert "-> now" not in r.output
+
+
+def test_a_change_is_shown_once_not_at_every_use(tmp_path, monkeypatch):
+    """An expression whose value changed is noted at its first step, not every use."""
+
+    def build_evaluator(ssh, timeout_s, overrides):
+        def evaluate(expr):
+            m = re.fullmatch(r'exists file "([^"]*)" of folder "([^"]*)"', expr)
+            if not m:
+                raise SubstitutionError("unexpected " + expr)
+            return [str((Path(m.group(2)) / m.group(1)).exists())]
+
+        return evaluate
+
+    monkeypatch.setattr(cli, "build_evaluator", build_evaluator)
+    sb = tmp_path / "sb"
+    check = '{exists file "made.txt" of folder "' + str((sb / "site").resolve()) + '"}'
+    script = write(
+        tmp_path,
+        "a.bas",
+        "createfile until E\nx\nE\ncopy __createfile made.txt\n"
+        f"createfile until F\n{check}\nF\n"
+        f"delete __createfile\ncreatefile until G\n{check}\nG\n",
+    )
+    r = runner.invoke(cli.app, [str(script), "--sandbox", str(sb)])
+    assert r.exit_code == 0, r.output
+    assert r.output.count('baseline "False" -> now "True"') == 1
+
+
+def test_become_is_passed_to_the_ssh_evaluator_only(tmp_path, fake):
+    runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path)),
+            "--ssh",
+            "jgstew@mini",
+            "--become",
+            "--sandbox",
+            str(tmp_path / "sb"),
+        ],
+    )
+    assert fake["builds"][0]["become"] is True  # the remote one
+    assert "become" not in fake["builds"][1]  # the local sandbox evaluator keeps its default
+
+
+def test_not_relevant_is_called_out_but_still_simulated(tmp_path, fake):
+    no = TASK.replace(
+        "<Relevance>mac of operating system</Relevance>",
+        "<Relevance>mac of operating system</Relevance><Relevance>windows of operating system</Relevance>",
+    )
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path, "t.bes", no)),
+            "--relevance",
+            "--set",
+            "windows of operating system=>False",
+            "--sandbox",
+            str(tmp_path / "sb"),
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert "Not relevant on local: a client would not run this action" in r.output
+    assert "Completed" in r.output
