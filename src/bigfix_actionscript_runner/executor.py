@@ -6,12 +6,14 @@ shown, or run on the host with `execute=True`. Prefetch statements are handled
 in a pre-pass before line 1, like a client.
 """
 
+import email.utils
 import hashlib
 import re
 import shlex
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .host import HostError
@@ -111,8 +113,12 @@ _NOOP_PREFIXES = (
 
 
 def _starts(low: str, keyword: str) -> bool:
-    """`low` starts with the keyword followed by whitespace (a space or a tab)."""
-    return low.startswith(keyword) and low[len(keyword) : len(keyword) + 1] in (" ", "\t")
+    """`low` starts with the keyword, then whitespace or `{`.
+
+    Clients accept `if{...}`, `continue if{...}` and `pause while{...}` with no
+    space, and plenty of real content is written that way.
+    """
+    return low.startswith(keyword) and low[len(keyword) : len(keyword) + 1] in (" ", "\t", "{")
 
 
 def _after(text: str, keyword: str) -> str:
@@ -152,6 +158,8 @@ class Simulator:
         self.cache_dir = cache_dir
         self.given_params = dict(params or {})
         self.parameters: dict[str, str] = {}
+        # set by a client before line 1; "Wed, 22 Oct 2026 05:00:00 +0000"
+        self.builtin_params = {"action issue date": email.utils.format_datetime(datetime.now(UTC))}
         self.execute = execute
         self.exit_code = assumed_exit_code
         self.assumed_exit_code = assumed_exit_code
@@ -168,8 +176,10 @@ class Simulator:
     # -- relevance ------------------------------------------------------------
 
     def _context(self) -> ActionContext:
+        # built-ins, then --param values (secure parameters and the like come
+        # from the console), then what the script itself set
         return ActionContext(
-            parameters=self.parameters,
+            parameters={**self.builtin_params, **self.given_params, **self.parameters},
             action_id=self.action_id,
             exit_code=self.exit_code,
             site_folder=self.sandbox.site,
@@ -180,6 +190,18 @@ class Simulator:
         if expr.strip() in self.overrides:
             return [self.overrides[expr.strip()]]
         return self._evaluate(rewrite(expr, self._context()))
+
+    def evaluate_relevance(self, clauses: list[str]) -> list[dict[str, str]]:
+        """The item's own relevance, with the same action context as its steps
+        (`client folder of current site` is the sandbox's, `--set` applies)."""
+        results = []
+        for clause in clauses:
+            try:
+                answers = self._eval(clause)
+                results.append({"relevance": clause, "result": ", ".join(answers)})
+            except SubstitutionError as e:
+                results.append({"relevance": clause, "error": str(e)})
+        return results
 
     def _eval_recorded(self, expr: str) -> list[str]:
         """Evaluate at this step (state may have changed) and record it for the step."""
@@ -546,14 +568,14 @@ class Simulator:
             self._step(lineno, text, "ok", sub, self.sandbox.display(target))
             return i
 
-        if low.startswith("continue if "):
-            if not self._bool(text[len("continue if ") :]):
+        if _starts(low, "continue if"):
+            if not self._bool(_after(text, "continue if")):
                 raise LineError("continue if is false: the action stops here")
             self._step(lineno, text, "ok")
             return i
 
-        if low.startswith("pause while "):
-            if self._bool(text[len("pause while ") :]):
+        if _starts(low, "pause while"):
+            if self._bool(_after(text, "pause while")):
                 self._step(
                     lineno, text, "warning", detail="condition is true: a client would wait here"
                 )

@@ -140,3 +140,10 @@ def test_action_without_actionscript(tmp_path):
 def test_fixlet_actions_load_like_task_actions(tmp_path):
     a = load_action(write(tmp_path, "f.bes", TASK.replace("Task>", "Fixlet>")), "Action2")
     assert a.script.strip() == "wait cmd /c echo two"
+
+
+def test_bes_content_is_recognized_whatever_the_extension(tmp_path):
+    """Exports are sometimes saved as .bes.xml or .xml."""
+    for name in ("t.bes.xml", "t.xml", "T.BES"):
+        a = load_action(write(tmp_path, name, TASK))
+        assert (a.title, a.action_id) == ("My Task", "Action1")

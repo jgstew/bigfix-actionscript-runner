@@ -39,10 +39,24 @@ def _check_mime(el: ET.Element, what: str) -> None:
         )
 
 
+def is_bes_text(text: str) -> bool:
+    """BES XML, whatever the file is called (exports are often .bes.xml or .xml)."""
+    head = text.lstrip("\ufeff \t\r\n")[:200].lower()
+    return head.startswith("<bes") or (head.startswith("<?xml") and "<bes" in text[:2000].lower())
+
+
+def is_bes(path: str | Path) -> bool:
+    path = Path(path)
+    if path.suffix.lower() == ".bes":
+        return True
+    with open(path, "rb") as f:
+        return is_bes_text(f.read(2048).decode("utf-8-sig", errors="replace"))
+
+
 def load_action(path: str | Path, action_id: str | None = None) -> LoadedAction:
     path = Path(path)
     raw = path.read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
-    if path.suffix.lower() != ".bes":
+    if path.suffix.lower() != ".bes" and not is_bes_text(raw):
         return LoadedAction(title=path.name, script=raw)
 
     try:

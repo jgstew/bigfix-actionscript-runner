@@ -24,9 +24,12 @@ def relevance_string(value: str) -> str:
     return '"' + value.replace("%", "%25").replace('"', "%22") + '"'
 
 
-_PARAMETER = re.compile(r'\bparameter\s+"([^"]*)"(?:\s+of\s+action\b)?', re.IGNORECASE)
-_ID = re.compile(r"\bid\s+of\s+action\b", re.IGNORECASE)
-_EXIT = re.compile(r"\bexit\s+code\s+of\s+action\b", re.IGNORECASE)
+# "of action" and "of active action" are the same action while it runs
+_ACTION = r"of\s+(?:active\s+)?action\b"
+_PARAMETER = re.compile(rf'\bparameter\s+"([^"]*)"(?:\s+{_ACTION})?', re.IGNORECASE)
+_ID = re.compile(rf"\bid\s+{_ACTION}", re.IGNORECASE)
+# the plural is the same number: the simulator tracks the last wait's code
+_EXIT = re.compile(rf"\bexit\s+codes?\s+{_ACTION}", re.IGNORECASE)
 _SITE = re.compile(r"\bclient\s+folder(s?)\s+of\s+current\s+site\b", re.IGNORECASE)
 _DATA = re.compile(r"\bdata\s+folder(s?)\s+of\s+client\b", re.IGNORECASE)
 
@@ -69,7 +72,7 @@ def rewrite(expr: str, ctx: ActionContext, *, folders: bool = True) -> str:
         if re.search(r"\bparameter\s*$", part, re.IGNORECASE) and i + 2 < len(parts) + 1:
             literal = parts[i + 1] if i + 1 < len(parts) else ""
             rest = parts[i + 2] if i + 2 < len(parts) else ""
-            m = re.match(r"\s+of\s+action\b", rest, re.IGNORECASE)
+            m = re.match(rf"\s+{_ACTION}", rest, re.IGNORECASE)
             tail = m.group(0) if m else ""
             combined = _rewrite_code(part + literal + tail, ctx, folders)
             out.append(combined)

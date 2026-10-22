@@ -876,3 +876,70 @@ def test_a_dry_run_assumes_the_exit_code_for_wait_but_not_for_run(tmp_path):
     assert s.exit_code == 9
     s.run("wait /bin/true\n")
     assert s.exit_code == 4
+
+
+# --- keyword followed directly by { (30+ real fixlets write `if{...}`) ----------------
+
+
+def test_if_and_elseif_directly_followed_by_a_brace(tmp_path):
+    _, s = sim(tmp_path, {"false": "False", "true": "True"})
+    r = s.run("if{false}\nexit 3\nelseif{true}\ndelete a\nendif\n")
+    assert r.status == "completed", r.message
+    assert outcomes(r) == [(1, "ok"), (2, "skipped"), (3, "ok"), (4, "ok"), (5, "ok")]
+
+
+def test_continue_if_directly_followed_by_a_brace_still_guards(tmp_path):
+    _, s = sim(tmp_path, {"false": "False"})
+    r = s.run("continue if{false}\ndelete a\n")
+    assert (r.status, r.failed_line) == ("failed", 1)
+
+
+def test_pause_while_directly_followed_by_a_brace(tmp_path):
+    _, s = sim(tmp_path, {"true": "True"})
+    r = s.run("pause while{true}\n")
+    assert outcomes(r) == [(1, "warning")]
+    assert "would wait" in r.steps[0].detail
+
+
+def test_if_with_a_brace_in_a_prefetch_block(tmp_path):
+    calls = []
+    _, s = sim(tmp_path, {"false": "False"}, downloader=downloader(calls))
+    r = s.run(
+        "begin prefetch block\nif{false}\n"
+        f"add prefetch item name=a sha1={SHA1} size=7 url=https://x/a sha256={SHA256}\n"
+        "endif\nend prefetch block\n"
+    )
+    assert r.status == "completed", r.message
+    assert calls == []
+
+
+# --- parameters a client has before the first line --------------------------------
+
+
+def test_action_issue_date_is_a_built_in_parameter(tmp_path):
+    sb, s = sim(tmp_path)
+    r = s.run('createfile until E\n{parameter "action issue date" of action}\nE\n')
+    assert r.status == "completed", r.message
+    text = Path(sb.site, "__createfile").read_text().strip()
+    # the format a client uses, e.g. "Wed, 22 Oct 2026 05:00:00 +0000"
+    assert re.fullmatch(r"[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} \+0000", text)
+
+
+def test_param_gives_any_parameter_a_value(tmp_path):
+    """Secure parameters and the like come from the console, not the script."""
+    sb, s = sim(
+        tmp_path,
+        params={"secret": "s3cr3t", "action issue date": "Mon, 01 Jan 2024 00:00:00 +0000"},
+    )
+    r = s.run(
+        'createfile until E\n{parameter "secret" of action} {parameter "action issue date"}\nE\n'
+    )
+    assert r.status == "completed", r.message
+    assert Path(sb.site, "__createfile").read_text() == "s3cr3t Mon, 01 Jan 2024 00:00:00 +0000\n"
+
+
+def test_a_script_parameter_wins_over_a_given_one_without_redefinition(tmp_path):
+    _, s = sim(tmp_path, params={"p": "given"})
+    r = s.run('parameter "p" = "script"\n')
+    assert r.status == "completed", r.message
+    assert s.parameters["p"] == "script"

@@ -128,3 +128,17 @@ def test_preflight_never_modifies_the_file(tmp_path):
 def test_relevance_findings_are_labelled_with_their_source(tmp_path):
     result = preflight(_script(tmp_path, "copy {pathname of (x} b\n"))
     assert {i.source for i in result.errors} >= {"bigfix-relevance-analyzer"}
+
+
+def test_bes_xml_files_get_bes_checks(tmp_path):
+    p = tmp_path / "t.bes.xml"
+    p.write_text(BES.format(relevance="exists (", action_expr="{id of action}"))
+    result = preflight(p)
+    assert any(i.relevance == "exists (" for i in result.errors)
+
+
+def test_unquoted_folder_create_is_a_warning(tmp_path):
+    # E525: a risk (a path with a space would break), not a failure on a client
+    result = preflight(_script(tmp_path, "folder create /tmp/x\n"))
+    assert result.errors == []
+    assert "E525" in [i.code for i in result.warnings]

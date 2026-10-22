@@ -209,22 +209,13 @@ def test_params_are_passed_to_action_parameter_query(tmp_path, fake):
     assert (sb / "site" / "__createfile").read_text() == "a=b\n"
 
 
-def test_relevance_flag_evaluates_the_items_relevance(tmp_path, fake):
-    r = runner.invoke(
-        cli.app, [str(write(tmp_path)), "--relevance", "--sandbox", str(tmp_path / "sb")]
-    )
-    assert r.exit_code == 0, r.output
-    assert "mac of operating system" in r.output
-    assert "True" in r.output
-
-
 def test_help_has_plain_on_switches(fake):
     r = runner.invoke(cli.app, ["--help"])
     assert r.exit_code == 0
     # Rich styles help in CI (GITHUB_ACTIONS / FORCE_COLOR), splitting "--execute"
     # into "-" + escape codes + "-execute"; compare the plain text
     text = re.sub(r"\x1b\[[0-9;]*m", "", r.output)
-    for flag in ("--execute", "--no-download", "--no-preflight", "--relevance", "--json"):
+    for flag in ("--execute", "--no-download", "--no-preflight", "--force", "--json"):
         assert flag in text
     assert "--no-no-" not in text
     assert "--no-execute" not in text
@@ -314,27 +305,6 @@ def test_become_is_passed_to_the_ssh_evaluator_only(tmp_path, fake):
     assert fake["hosts"] == [{"ssh": "user@mini", "become": True}]
 
 
-def test_not_relevant_is_called_out_but_still_simulated(tmp_path, fake):
-    no = TASK.replace(
-        "<Relevance>mac of operating system</Relevance>",
-        "<Relevance>mac of operating system</Relevance><Relevance>windows of operating system</Relevance>",
-    )
-    r = runner.invoke(
-        cli.app,
-        [
-            str(write(tmp_path, "t.bes", no)),
-            "--relevance",
-            "--set",
-            "windows of operating system=>False",
-            "--sandbox",
-            str(tmp_path / "sb"),
-        ],
-    )
-    assert r.exit_code == 0, r.output
-    assert "Not relevant on local: a client would not run this action" in r.output
-    assert "Completed" in r.output
-
-
 # --- sandbox modes ------------------------------------------------------------------
 
 
@@ -408,17 +378,6 @@ def test_no_sandbox_fails_cleanly_without_a_client(tmp_path, fake):
 
 def test_build_host_is_local_without_ssh():
     assert isinstance(cli.build_host(None), LocalHost)
-
-
-def test_relevance_errors_are_reported_not_fatal(tmp_path, fake):
-    bad = TASK.replace("mac of operating system", "bogus inspector")
-    r = runner.invoke(
-        cli.app,
-        [str(write(tmp_path, "t.bes", bad)), "--relevance", "--sandbox", str(tmp_path / "sb")],
-    )
-    assert r.exit_code == 0, r.output
-    assert "ERROR: " in r.output and "bogus inspector" in r.output
-    assert "Not relevant on local" in r.output
 
 
 def test_exit_is_reported_with_its_code(tmp_path, fake):
@@ -537,3 +496,125 @@ def test_json_connection_errors_are_json(tmp_path, fake, monkeypatch):
     r = runner.invoke(cli.app, [str(write(tmp_path)), "--json", "--ssh", "u@h"])
     assert r.exit_code == 2
     assert "could not connect" in json.loads(r.output)["message"]
+
+
+# --- applicability relevance: only run where a client would ------------------------
+
+NOT_RELEVANT = TASK.replace(
+    "<Relevance>mac of operating system</Relevance>",
+    "<Relevance>mac of operating system</Relevance>"
+    "<Relevance>windows of operating system</Relevance>",
+)
+
+
+def test_relevant_items_run_and_their_relevance_is_shown(tmp_path, fake):
+    sb = tmp_path / "sb"
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--sandbox", str(sb)])
+    assert r.exit_code == 0, r.output
+    assert "Relevant on local" in r.output
+    assert "True  <=  mac of operating system" in r.output
+    assert "Completed" in r.output
+
+
+def test_not_relevant_items_are_not_run(tmp_path, fake):
+    sb = tmp_path / "sb"
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path, "t.bes", NOT_RELEVANT)),
+            "--set",
+            "windows of operating system=>False",
+            "--sandbox",
+            str(sb),
+        ],
+    )
+    assert r.exit_code == 4, r.output
+    assert "Not relevant on local: not run (--force runs it anyway)" in r.output
+    assert "False  <=  windows of operating system" in r.output
+    assert not (sb / "__BESData" / "__Global" / "Logs" / "hello.txt").exists()
+    assert "name of operating system" not in fake["calls"]  # no step was evaluated
+
+
+def test_relevance_errors_count_as_not_relevant(tmp_path, fake):
+    bad = TASK.replace("mac of operating system", "bogus inspector")
+    r = runner.invoke(
+        cli.app, [str(write(tmp_path, "t.bes", bad)), "--sandbox", str(tmp_path / "sb")]
+    )
+    assert r.exit_code == 4
+    assert "ERROR: " in r.output and "bogus inspector" in r.output
+
+
+def test_force_runs_anyway(tmp_path, fake):
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path, "t.bes", NOT_RELEVANT)),
+            "--force",
+            "--set",
+            "windows of operating system=>False",
+            "--sandbox",
+            str(tmp_path / "sb"),
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert "Not relevant on local: running anyway (--force)" in r.output
+    assert "Completed" in r.output
+
+
+def test_not_relevant_in_json(tmp_path, fake):
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path, "t.bes", NOT_RELEVANT)),
+            "--json",
+            "--set",
+            "windows of operating system=>False",
+        ],
+    )
+    assert r.exit_code == 4
+    data = json.loads(r.output)
+    assert data["status"] == "not relevant"
+    assert data["relevant"] is False
+    assert data["relevance"][1] == {"relevance": "windows of operating system", "result": "False"}
+
+
+def test_a_temporary_sandbox_is_removed_when_nothing_runs(tmp_path, fake, monkeypatch):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path, "t.bes", NOT_RELEVANT)),
+            "--set",
+            "windows of operating system=>False",
+        ],
+    )
+    assert r.exit_code == 4
+    assert not list(tmp_path.glob("bigfix-actionscript-runner-*"))
+
+
+def test_relevance_sees_the_action_context(tmp_path, fake):
+    """Relevance about the site's own files is asked about the sandbox's site folder."""
+    rel = TASK.replace(
+        "<Relevance>mac of operating system</Relevance>",
+        '<Relevance>not exists file "done.txt" of client folder of current site</Relevance>',
+    )
+    sb = tmp_path / "sb"
+    r = runner.invoke(
+        cli.app,
+        [
+            str(write(tmp_path, "t.bes", rel)),
+            "--set",
+            'not exists file "done.txt" of client folder of current site=>True',
+            "--sandbox",
+            str(sb),
+        ],
+    )
+    assert r.exit_code == 0, r.output
+
+
+def test_plain_actionscript_has_no_relevance_to_check(tmp_path, fake):
+    r = runner.invoke(
+        cli.app, [str(write(tmp_path, "a.bas", "delete a\n")), "--sandbox", str(tmp_path / "sb")]
+    )
+    assert r.exit_code == 0
+    assert "Relevant" not in r.output and "Not relevant" not in r.output

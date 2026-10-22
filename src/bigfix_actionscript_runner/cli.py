@@ -18,7 +18,7 @@ from .substitution import Evaluator, SubstitutionError
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
-EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_PREFLIGHT = 0, 1, 2, 3
+EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_PREFLIGHT, EXIT_NOT_RELEVANT = 0, 1, 2, 3, 4
 
 
 def build_evaluator(
@@ -59,17 +59,6 @@ def _overrides(values: list[str]) -> dict[str, str]:
     return out
 
 
-def _relevance(action: LoadedAction, evaluate: Evaluator) -> list[dict[str, str]]:
-    results = []
-    for clause in action.relevance:
-        try:
-            answers = evaluate(clause)
-            results.append({"relevance": clause, "result": ", ".join(answers)})
-        except SubstitutionError as e:
-            results.append({"relevance": clause, "error": str(e)})
-    return results
-
-
 def _sandbox_line(sandbox: Sandbox) -> str:
     if sandbox.mode == "off":
         return f"No sandbox: the real client folders ({sandbox.site}, {sandbox.data})"
@@ -84,6 +73,7 @@ def _print_text(
     pre: PreflightResult | None,
     relevance: list[dict[str, str]] | None,
     report: Report | None,
+    force: bool = False,
 ) -> None:
     print(f"{action.title}" + (f"  [{action.action_id}]" if action.action_id else ""))
     print(f"Target: {target}")
@@ -104,11 +94,12 @@ def _print_text(
         print("Relevance:")
         for r in relevance:
             print(f"  {r.get('result', 'ERROR: ' + r.get('error', ''))}  <=  {r['relevance']}")
-        if any(r.get("result", "").lower() != "true" for r in relevance):
-            print(
-                f"Not relevant on {target}: a client would not run this action "
-                "(simulating it anyway)"
-            )
+        if all_true(relevance):
+            print(f"Relevant on {target}")
+        elif force:
+            print(f"Not relevant on {target}: running anyway (--force)")
+        else:
+            print(f"Not relevant on {target}: not run (--force runs it anyway)")
     if report is None or sandbox is None:
         return
     if report.baseline:
@@ -219,8 +210,15 @@ def simulate(
     no_preflight: Annotated[
         bool, typer.Option("--no-preflight", help="Skip the bigfix-relevance-analyzer preflight")
     ] = False,
-    relevance: Annotated[
-        bool, typer.Option("--relevance", help="Also evaluate the item's own relevance first")
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Run even when the item's relevance isn't True on the target "
+                "(e.g. to run it again while testing)"
+            ),
+        ),
     ] = False,
     no_baseline: Annotated[
         bool,
@@ -270,7 +268,6 @@ def simulate(
         sandbox = _make_sandbox(
             host, evaluate, execute, no_sandbox, site, sandbox_dir, target, as_json
         )
-        rel = _relevance(action, evaluate) if relevance else None
         simulator = Simulator(
             sandbox,
             evaluate,
@@ -282,14 +279,27 @@ def simulate(
             baseline=not no_baseline,
             overrides=overrides,
         )
-        report = simulator.run(action.script, first_line=action.first_line)
+        # like a client: the action only runs where the item is relevant
+        rel = simulator.evaluate_relevance(action.relevance) if action.relevance else None
+        report = None
+        if rel is None or all_true(rel) or force:
+            report = simulator.run(action.script, first_line=action.first_line)
+        elif sandbox_dir is None and sandbox.root is not None:
+            host.delete_tree(sandbox.root)  # a temporary sandbox nothing ran in
     finally:
         host.close()
     if as_json:
         print(json.dumps(_payload(action, target, sandbox, pre, rel, report), indent=2))
     else:
-        _print_text(action, target, sandbox, pre, rel, report)
+        _print_text(action, target, sandbox, pre, rel, report, force)
+    if report is None:
+        raise typer.Exit(EXIT_NOT_RELEVANT)
     raise typer.Exit(EXIT_FAILED if report.status == "failed" else EXIT_OK)
+
+
+def all_true(relevance: list[dict[str, str]]) -> bool:
+    """Every clause answered True, as a client requires before it runs an action."""
+    return all(r.get("result", "").lower() == "true" for r in relevance)
 
 
 def _usage_problem(
@@ -363,7 +373,12 @@ def _payload(
         "sandbox_mode": sandbox.mode if sandbox else None,
         "preflight": asdict(pre) if pre is not None else None,
         "relevance": relevance,
-        "status": report.status if report else "not run",
+        "relevant": all_true(relevance) if relevance is not None else None,
+        "status": report.status
+        if report
+        else "not relevant"
+        if relevance is not None and not all_true(relevance)
+        else "not run",
         "failed_line": report.failed_line if report else None,
         "message": report.message if report else "",
         "exit_code": report.exit_code if report else None,

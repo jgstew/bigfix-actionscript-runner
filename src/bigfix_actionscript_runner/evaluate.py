@@ -51,7 +51,20 @@ class QnaEvaluator:
         results: list[Any] = asyncio.run(self._api(expr, [self.target], timeout_s=self.timeout_s))
         result = results[0]
         if result.error:
-            kind = result.error_kind or "error"
-            message = result.error if kind == "relevance" else f"{kind}: {result.error}"
-            raise SubstitutionError(message)
+            raise SubstitutionError(self._message(result.error, result.error_kind or "error"))
         return list(result.answers)
+
+    def _message(self, error: str, kind: str) -> str:
+        message = error if kind == "relevance" else f"{kind}: {error}"
+        if "no inspector context" in error.lower():
+            # qna has no running client behind it: client-only inspectors fail
+            message += (
+                " (this inspector needs a running BigFix client, which qna doesn't "
+                "have; give it an answer with --set 'EXPR=>VALUE')"
+            )
+        elif kind == "transport" and not error.split(":", 1)[-1].strip():
+            message += (
+                f" (no details: possibly the {self.timeout_s:g} s timeout; "
+                "a slow expression may need a larger --timeout)"
+            )
+        return message

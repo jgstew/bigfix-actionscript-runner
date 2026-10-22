@@ -11,6 +11,9 @@ the action so its changes can be measured.
 - **Runs on the target:** with `--ssh USER@HOST`, the sandbox, the file
   commands, the commands and the relevance all happen on that machine
   (macOS, Linux or Windows). Nothing has to be set up there beyond SSH and `qna`.
+- **Only where it is relevant:** like a client, the action runs only when
+  every one of the item's relevance clauses is True on the target;
+  `--force` runs it anyway (handy for running it again while testing).
 - **Preflight:** relevance is checked first with
   [bigfix-relevance-analyzer](https://github.com/jgstew/bigfix-relevance-analyzer)
   and the ActionScript with [pre-commit-bigfix](https://github.com/jgstew/pre-commit-bigfix)
@@ -64,6 +67,10 @@ Target: admin@mac-test
 Sandbox (everything; dry run): /var/folders/.../bigfix-actionscript-runner-k2j3h4
 Preflight: 24 relevance expression(s) checked, 0 error(s), 5 warning(s)
   line 46: warning [non-unique-risk bigfix-relevance-analyzer] 'pathname' is written singular ...
+Relevance:
+  True  <=  mac of operating system
+  True  <=  not exists files whose(name of it as lowercase starts with "yara_results_php.text" ...
+Relevant on admin@mac-test
 Baseline: 9 expression(s), 1 error(s) before line 1, 3 deferred (use parameters set later)
 
    38  prefetched add prefetch item name=yara-x-v1.22.0-x86_64-apple-darwin.tar.gz sha1=... size=9476144 url=...
@@ -88,10 +95,10 @@ Completed
 | `--execute` | Really run the action: commands run, and paths outside the client folders are the real ones. |
 | `--no-sandbox` | With `--execute`: use the real client's folders as well. Needs `--site`. |
 | `--site NAME` | With `--no-sandbox`: the site whose client folder is "the current site". |
-| `--param NAME=VALUE` | Value for an `action parameter query` (repeatable). Otherwise its default is used. |
+| `--param NAME=VALUE` | An action parameter's value (repeatable): for an `action parameter query` (otherwise its default is used), a secure parameter, or any parameter a console would set. A `parameter` line in the script still sets its own. |
 | `--set 'EXPR=>VALUE'` | Fixed answer for an expression as written in the action (repeatable), e.g. for an inspector the target doesn't have. |
 | `--exit-code N` | Exit code assumed for `wait` commands that aren't run (default 0). |
-| `--relevance` | Also evaluate the item's own relevance clauses first; says so if a client wouldn't run the action. |
+| `--force` | Run even when the item's relevance isn't True on the target (it is still evaluated and shown). |
 | `--no-baseline` | Skip the up-front evaluation of every expression (each is still evaluated at its step). |
 | `--no-download` | Placeholder files instead of downloading prefetches. |
 | `--no-preflight` | Skip the preflight checks. |
@@ -101,7 +108,7 @@ Completed
 
 Exit codes: `0` the action completed (or ran `exit`), `1` it failed (the
 message names the line), `2` usage, load or connection error, `3` preflight
-errors. With `--json`, errors are JSON too: `{"status": "error", "message": ...}`.
+errors, `4` not relevant on the target, so not run (without `--force`). With `--json`, errors are JSON too: `{"status": "error", "message": ...}`.
 
 ## Sandbox modes
 
@@ -164,15 +171,26 @@ The SSH user's host keys and keys come from `~/.ssh` as for the `ssh` command.
 | Checker | Checks | Blocks the run | Reported only |
 |---|---|---|---|
 | bigfix-relevance-analyzer | the item's relevance and every `{...}` | parse and type errors | style/risk rules (`non-unique-risk`, `plural-preferred`, ...) |
-| pre-commit-bigfix (`bes-actionscript-validate-script`, `-lint-schclass`, `-validate-prefetch`) | ActionScript structure, commands, prefetch lines | E-codes: things a client rejects or fails on (`E500` unclosed `if`, `E300` unknown command, `E400` bad prefetch, ...) | W-codes, and the convention-only `E401` (no sha256), `E402` (old unzip), `E304`/`E404` |
+| pre-commit-bigfix (`bes-actionscript-validate-script`, `-lint-schclass`, `-validate-prefetch`) | ActionScript structure, commands, prefetch lines | E-codes: things a client rejects or fails on (`E500` unclosed `if`, `E300` unknown command, `E400` bad prefetch, ...) | W-codes, and the convention-only `E401` (no sha256), `E402` (old unzip), `E525` (unquoted `folder create` path), `E304`/`E404` |
 
 ## How relevance is evaluated
 
+The item's own relevance clauses (a Fixlet's or Task's `<Relevance>`) are
+evaluated first, on the target, with the same action context as the steps
+(so `client folder of current site` is the sandbox's). The action runs only
+if every clause is True, as on a client; an error counts as not relevant.
+Otherwise nothing runs, a temporary sandbox is removed, and the exit code is
+`4`. `--force` runs it anyway. A plain ActionScript file has no relevance and
+always runs.
+
 `qna` has no action context, so before an expression is evaluated:
 
-- `parameter "x"` becomes the parameter's value (a string literal),
-- `id of action` and `exit code of action` become numbers (the exit code of
-  the last `wait`, or `--exit-code` when commands aren't run),
+- `parameter "x"` becomes the parameter's value (a string literal);
+  `parameter "action issue date" of action` is the run's start time, in a
+  client's format (`Wed, 22 Oct 2026 05:00:00 +0000`),
+- `id of action` and `exit code(s) of action` become numbers (the exit code of
+  the last `wait`, or `--exit-code` when commands aren't run), with `of
+  active action` too,
 - `data folder(s) of client` and `client folder(s) of current site` point
   at the sandbox's folders (or the real ones with `--no-sandbox`).
 
@@ -186,6 +204,11 @@ its step, and the trace notes where the value differs from the baseline:
    54  ok         copy "__Download/{name of file whose(name of it starts with "yara-x-v") of folder "__Download" ...
                     {name of file whose(...)...}: baseline error (Singular expression refers to nonexistent object.) -> now "yara-x-v1.22.0-x86_64-apple-darwin.tar.gz"
 ```
+
+Some inspectors exist only in a running BigFix client, so `qna` answers
+"No inspector context" (for example `computer id`, `last command time of
+client`). Give such an expression an answer with `--set`, which matches the
+whole expression as written in the action.
 
 An action gets the answers of the machine it runs on: a Linux task run on a
 Mac gets the Mac's answers (its prefetch `if` conditions are false, so
@@ -210,7 +233,9 @@ doesn't check TLS certificates (the hashes are checked afterwards). A
 | Anything else | A warning; the action continues. |
 
 Only ActionScript is run; actions in other script types (sh, AppleScript,
-PowerShell) are refused.
+PowerShell) are refused. Keywords may be followed directly by a brace, as
+clients accept (`if{...}`, `continue if{...}`, `pause while{...}`). A file is
+read as BES XML by its content, so `.bes.xml` exports work too.
 
 ## Development
 

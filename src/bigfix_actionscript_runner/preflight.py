@@ -15,10 +15,14 @@ Two checkers, each where it applies:
 Warnings never block a run.
 """
 
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import bigfix_relevance_analyzer as bra
+
+from .load import is_bes
 
 ANALYZER = "bigfix-relevance-analyzer"
 PRE_COMMIT_BIGFIX = "pre-commit-bigfix"
@@ -30,6 +34,7 @@ NON_BLOCKING = frozenset(
         "E402",  # an outdated unzip.exe prefetch: still works
         "E304",  # guards for pre-commit-bigfix's own auto-fix, which never runs here
         "E404",
+        "E525",  # an unquoted folder create path: breaks only if the path has a space
     }
 )
 
@@ -102,6 +107,12 @@ def _actionscript_checks(path: Path, result: PreflightResult) -> None:
 
 def preflight(path: str | Path) -> PreflightResult:
     path = Path(path)
+    if path.suffix.lower() not in _BES_SUFFIXES and is_bes(path):
+        # the checkers decide by extension; give BES content its .bes name
+        with tempfile.TemporaryDirectory(prefix="bfasr-preflight-") as tmp:
+            copy = Path(tmp) / (path.name.split(".")[0] + ".bes")
+            shutil.copyfile(path, copy)
+            return preflight(copy)
     result = PreflightResult()
     if path.suffix.lower() in _BES_SUFFIXES:
         _relevance_bes(path, result)

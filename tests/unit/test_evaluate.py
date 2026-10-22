@@ -86,3 +86,19 @@ def test_overrides_short_circuit_qna():
 def test_become_for_ssh_targets_that_need_root():
     assert make_target(ssh="user@mini", become=True).become is True
     assert make_target(ssh="user@mini").become is None  # left to bigfix-remote-client-relevance
+
+
+def test_no_inspector_context_explains_itself():
+    ev = QnaEvaluator(
+        make_target(), api=fake_api(error="No inspector context.", error_kind="relevance")
+    )
+    with pytest.raises(SubstitutionError, match="needs a running BigFix client.*--set"):
+        ev('value of setting "x" of client')
+
+
+def test_a_transport_error_without_details_mentions_the_timeout():
+    ev = QnaEvaluator(
+        make_target(ssh="u@h"), timeout_s=7, api=fake_api(error="h: ", error_kind="transport")
+    )
+    with pytest.raises(SubstitutionError, match="7 s.*--timeout"):
+        ev('descendants of folder "/"')

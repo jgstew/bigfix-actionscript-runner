@@ -82,3 +82,12 @@ def test_folders_can_be_left_alone_for_remote_evaluation():
 
 def test_case_insensitive_like_relevance():
     assert rewrite("ID OF ACTION", ctx()) == "12345"
+
+
+def test_active_action_and_plural_forms():
+    assert rewrite("exists (exit codes of active action) whose(it = 0)", ctx(exit_code=0)) == (
+        "exists (0) whose(it = 0)"
+    )
+    assert rewrite("exit code of active action", ctx(exit_code=2)) == "2"
+    assert rewrite("id of active action", ctx()) == "12345"
+    assert rewrite('parameter "p" of active action', ctx(parameters={"p": "v"})) == '"v"'
