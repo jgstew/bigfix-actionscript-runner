@@ -40,9 +40,13 @@ class Host(Protocol):
     def delete_tree(self, path: str) -> None: ...
     def put_file(self, local: Path | str, dst: str) -> None: ...
     def sha256(self, path: str) -> str: ...
-    def run(
-        self, argv: list[str], *, cwd: str, wait: bool, timeout: float | None = None
-    ) -> int: ...
+    def run(self, argv: list[str], *, cwd: str, wait: bool, timeout: float | None = None) -> int:
+        """Run argv[0] in cwd: its exit code if `wait`, else 0 once started.
+
+        On a Windows host argv[1:] are command-line tokens, passed as written.
+        """
+        ...
+
     def close(self) -> None: ...
 
 
@@ -124,11 +128,15 @@ class LocalHost:
         return h.hexdigest()
 
     def run(self, argv: list[str], *, cwd: str, wait: bool, timeout: float | None = None) -> int:
+        command: list[str] | str = argv
+        if self.windows:
+            # argv[1:] are command-line tokens as written (see executor._argv)
+            command = " ".join([subprocess.list2cmdline(argv[:1]), *argv[1:]])
         try:
             if not wait:
-                subprocess.Popen(argv, cwd=cwd, start_new_session=True)
+                subprocess.Popen(command, cwd=cwd, start_new_session=True)
                 return 0
-            return subprocess.run(argv, cwd=cwd, timeout=timeout, check=False).returncode
+            return subprocess.run(command, cwd=cwd, timeout=timeout, check=False).returncode
         except subprocess.TimeoutExpired as e:
             raise HostError(f"timed out after {timeout} seconds") from e
         except OSError as e:

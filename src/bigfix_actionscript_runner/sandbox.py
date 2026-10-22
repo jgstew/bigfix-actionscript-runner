@@ -32,6 +32,11 @@ from .host import Host, LocalHost
 
 MODES = ("full", "client", "off")
 
+
+class SandboxEscape(ValueError):
+    """A path would land outside where the sandbox allows (a bug or hostile input)."""
+
+
 _DRIVE = re.compile(r"^([A-Za-z]):[\\/]?(.*)$")
 
 
@@ -79,9 +84,13 @@ class Sandbox:
     def _join(self, base: str, *parts: str) -> str:
         return str(self._pure(base).joinpath(*parts))
 
-    @staticmethod
-    def _parts(text: str) -> list[str]:
-        """Path components (either separator), with .. resolved but never above the start."""
+    def _parts(self, text: str) -> list[str]:
+        """Path components (either separator), with .. resolved but never above the start.
+
+        On Windows a component like `C:` would make joinpath switch drives
+        (`D:\\sb\\site` + `C:` + `Windows` is `C:Windows`), so `:` is replaced:
+        it can't be in a Windows file name anyway.
+        """
         out: list[str] = []
         for part in re.split(r"[\\/]+", text):
             if part in ("", "."):
@@ -90,8 +99,17 @@ class Sandbox:
                 if out:
                     out.pop()
                 continue
-            out.append(part)
+            out.append(part.replace(":", "_") if self.host.windows else part)
         return out
+
+    @staticmethod
+    def _strip_device_prefix(path: str) -> str:
+        """`\\\\?\\C:\\x` and `\\\\.\\C:\\x` name `C:\\x`; `\\\\?\\UNC\\s\\x` names `\\\\s\\x`."""
+        m = re.match(r"^[\\/]{2}[?.][\\/](UNC[\\/])?", path, re.IGNORECASE)
+        if not m:
+            return path
+        rest = path[m.end() :]
+        return "\\\\" + rest if m.group(1) else rest
 
     def _norm(self, path: str) -> str:
         if not self.host.windows:
@@ -101,6 +119,10 @@ class Sandbox:
     def _absolute(self, path: str) -> str | None:
         """`path` normalized, if it is absolute on the host; None if relative."""
         if self.host.windows:
+            path = self._strip_device_prefix(path)
+            if re.match(r"^[\\/](?![\\/])", path):
+                # rooted: the root of the current drive, the site folder's
+                path = self._pure(self.site).drive + path
             return self._norm(path) if _DRIVE.match(path) or path.startswith("\\\\") else None
         p = path.replace("\\", "/")
         return self._norm(p) if p.startswith("/") else None
@@ -119,16 +141,35 @@ class Sandbox:
         if real is not None:
             if self.mode != "full" or self.contains(real):
                 return real
-            return self._join(self._fs(), *self._fs_parts(path))
+            return self._inside(self._fs(), self._fs_parts(real))
         if _DRIVE.match(path) and self.mode == "full":  # a Windows path on a POSIX target
-            return self._join(self._fs(), *self._fs_parts(path))
-        return self._join(self.site, *self._parts(path))
+            return self._inside(self._fs(), self._fs_parts(path))
+        return self._inside(self.site, self._parts(path))
+
+    def _inside(self, base: str, parts: list[str]) -> str:
+        """base/parts, refusing anything that isn't under base (defence in depth)."""
+        joined = self._join(base, *parts)
+        norm, root = self._norm(joined), self._norm(base)
+        if self.host.windows:
+            norm, root = norm.lower(), root.lower()
+        if norm != root and not norm.startswith(root.rstrip(self._ospath.sep) + self._ospath.sep):
+            raise SandboxEscape(f"{joined} is outside {base}")
+        return joined
+
+    def is_protected(self, path: str) -> bool:
+        """The sandbox's own folders and the client folders: never deleted."""
+        norm = self._norm(path)
+        protected = {self._norm(p) for p in self.protected}
+        if self.host.windows:
+            return norm.lower() in {p.lower() for p in protected}
+        return norm in protected
 
     def _fs(self) -> str:
         assert self.fs is not None  # full mode always has one
         return self.fs
 
     def _fs_parts(self, path: str) -> list[str]:
+        path = self._strip_device_prefix(path)
         drive = _DRIVE.match(path)
         if drive:
             return [drive.group(1).upper(), *self._parts(drive.group(2))]

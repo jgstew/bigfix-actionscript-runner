@@ -86,8 +86,27 @@ def _quiet() -> Iterator[list[warnings.WarningMessage]]:
         yield caught
 
 
+def check_name(name: str) -> str:
+    """`name` if it is a plain file name, else PrefetchError.
+
+    The name comes from the .bes file and is joined onto __Download (and a
+    local staging folder), so a separator, `..`, a drive or an absolute path
+    would put the file somewhere else entirely, even in a dry run.
+    """
+    if not name or name in (".", "..") or any(c in name for c in "/\\:\0") or name != name.strip():
+        raise PrefetchError(f"not a plain file name: {name!r}")
+    return name
+
+
 def parse_prefetch(line: str) -> PrefetchItem | None:
     """A PrefetchItem for a prefetch/download line, None for any other line."""
+    item = _parse(line)
+    if item is not None:
+        check_name(item.name)
+    return item
+
+
+def _parse(line: str) -> PrefetchItem | None:
     line = line.strip()
     if _PREFETCH_START.match(line):
         # bigfix-prefetch expects the block form with a leading space before each key
@@ -154,6 +173,7 @@ def fetch(
     item: PrefetchItem, dest_dir: Path, cache_dir: Path, downloader: Downloader | None = AUTO
 ) -> Path:
     """Put `item` at dest_dir/name. `downloader=None` writes a placeholder instead."""
+    check_name(item.name)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / item.name
     if downloader is None:
@@ -163,8 +183,13 @@ def fetch(
         downloader = bigfix_prefetch_download if item.hashed else tls_download
     cached = cache_dir / item.sha256 if item.sha256 else None
     if cached is not None and cached.exists():
-        shutil.copyfile(cached, dest)
-        return dest
+        try:
+            _verify(item, cached)
+        except PrefetchError:
+            cached.unlink()  # damaged or tampered with: download it again
+        else:
+            shutil.copyfile(cached, dest)
+            return dest
     with tempfile.TemporaryDirectory(dir=dest_dir) as tmp:
         part = Path(tmp) / item.name
         downloader(item.url, part)

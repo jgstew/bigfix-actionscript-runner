@@ -133,7 +133,7 @@ def test_windows_sha256_is_lowercase():
 def test_windows_run_waits_with_start_process_and_returns_the_exit_code():
     host, runner = windows(lambda s, d: (b"", b"", 5))
     code = host.run(
-        ["C:\\Program Files\\x\\app.exe", "/quiet", "a b"], cwd="C:\\Temp\\sb\\site", wait=True
+        ["C:\\Program Files\\x\\app.exe", "/quiet", '"a b"'], cwd="C:\\Temp\\sb\\site", wait=True
     )
     assert code == 5
     script = runner.scripts[0]

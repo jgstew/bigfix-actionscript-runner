@@ -35,7 +35,9 @@ dependencies = [
   "platformdirs>=4",
   # Not on PyPI yet, and PyPI rejects packages with direct URL dependencies:
   # https://github.com/jgstew/pre-commit-bigfix/issues/46
-  "pre-commit-bigfix @ git+https://github.com/jgstew/pre-commit-bigfix",
+  # Pinned to a commit: installs from a wheel or sdist ignore uv.lock, and a
+  # git source would otherwise follow that repo's main branch, unquarantined.
+  "pre-commit-bigfix @ git+https://github.com/jgstew/pre-commit-bigfix@e2be9a8e47a2e9862c1f34a63b9a9467d6e79516",
   "requests>=2.31",
   "typer>=0.12",
 ]
@@ -82,7 +84,9 @@ exclude-newer = "-P7D"
 # fixed date lifts the quarantine for those releases only; remove each once
 # the rolling window has passed it (after 2026-10-29), or it would hold the
 # package back from then on.
-exclude-newer-package = { bigfix-remote-client-relevance = "2026-10-22T00:00:00Z", bigfix-remote-session-relevance = "2026-10-22T00:00:00Z", bigfix-relevance-analyzer = "2026-10-22T00:00:00Z" }
+# certifi 2026.10.19 fixes GHSA-6q48-6c7w-9gw2 (compromised emSign CAs), a
+# security fix worth taking before the window passes; same removal date.
+exclude-newer-package = { bigfix-remote-client-relevance = "2026-10-22T00:00:00Z", bigfix-remote-session-relevance = "2026-10-22T00:00:00Z", bigfix-relevance-analyzer = "2026-10-22T00:00:00Z", certifi = "2026-10-22T00:00:00Z" }
 
 # --- Tooling ---------------------------------------------------------------
 

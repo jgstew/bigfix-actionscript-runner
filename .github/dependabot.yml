@@ -1,6 +1,6 @@
 # Dependency-update alerts.
 #
-# Requires Dependabot to be enabled on the GHES instance - this file is inert,
+# Requires Dependabot to be enabled for the repository - this file is inert,
 # not an error, if it is not. Check Security > Dependabot settings.
 #
 # The 7-day cooldown is the point, not a courtesy: a release published minutes
@@ -8,9 +8,8 @@
 # pyproject.toml and is zizmor's minimum.
 version: 2
 updates:
-  # "uv", not "pip": uv.lock is what the release wheel is built from
-  # (uv sync --locked), and "pip" would read pyproject.toml without updating
-  # the lock. Fall back to "pip" if this instance rejects the newer ecosystem.
+  # "uv", not "pip": it updates uv.lock (what CI installs with --frozen)
+  # together with pyproject.toml; "pip" would leave the lock behind.
   - package-ecosystem: "uv"
     directory: "/"
     schedule:

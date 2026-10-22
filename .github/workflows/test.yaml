@@ -51,7 +51,7 @@ jobs:
       - name: Type-check
         run: uv run mypy src
 
-      # Tests needing a real qna, Docker, sshd, or the network are marked and
+      # Tests needing a real qna, an SSH test machine, or the network are marked and
       # auto-skip here (see tests/conftest.py).
       - name: Test
         run: uv run pytest -q -rs

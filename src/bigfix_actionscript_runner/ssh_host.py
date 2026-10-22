@@ -17,7 +17,6 @@ import base64
 import logging
 import re
 import shlex
-import subprocess
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
@@ -96,13 +95,20 @@ class AsyncsshRunner:
             return self._loop.run_until_complete(go())
         except (TimeoutError, asyncssh.TimeoutError) as e:
             raise TimeoutError(command) from e
+        except (OSError, asyncssh.Error) as e:  # connection lost, channel refused, ...
+            raise HostError(f"SSH command failed: {e}") from e
 
     def put_file(self, local: Path | str, remote: str) -> None:
+        import asyncssh
+
         async def go() -> None:
             async with self._conn.start_sftp_client() as sftp:
                 await sftp.put(str(local), remote)
 
-        self._loop.run_until_complete(go())
+        try:
+            self._loop.run_until_complete(go())
+        except (OSError, asyncssh.Error) as e:
+            raise HostError(f"SFTP put to {remote} failed: {e}") from e
 
     def close(self) -> None:
         if self._loop.is_closed():
@@ -112,9 +118,15 @@ class AsyncsshRunner:
         self._loop.close()
 
 
+# PowerShell ends a single-quoted string at any of these, not only at '
+_PS_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
 def _ps(text: str) -> str:
     """A PowerShell single-quoted literal: nothing inside is expanded."""
-    return "'" + text.replace("'", "''") + "'"
+    for q in _PS_QUOTES:
+        text = text.replace(q, q * 2)
+    return "'" + text + "'"
 
 
 class SSHHost:
@@ -130,7 +142,11 @@ class SSHHost:
         self.become = become
         self._runner = runner if runner is not None else AsyncsshRunner(destination)
         if windows is None:
-            out, _, code = self._runner.run("uname -s")
+            try:
+                out, _, code = self._runner.run("uname -s")
+            except BaseException:
+                self._runner.close()
+                raise
             # Git for Windows / MSYS2 / Cygwin put a GNU uname on PATH, but the
             # login shell is still cmd.exe (or PowerShell), so they are Windows
             windows = code != 0 or out.strip().upper().startswith(_WINDOWS_UNAMES)
@@ -242,7 +258,11 @@ class SSHHost:
 
     def delete_file(self, path: str) -> None:
         if self.windows:
-            self._win(f"Remove-Item -LiteralPath {_ps(path)} -Force -ErrorAction SilentlyContinue")
+            # missing is fine (like rm -f); access denied is not
+            self._win(
+                f"if (Test-Path -LiteralPath {_ps(path)}) "
+                f"{{ Remove-Item -LiteralPath {_ps(path)} -Force }}"
+            )
         else:
             self._posix('rm -f -- "$1"', path)
 
@@ -310,7 +330,8 @@ class SSHHost:
         # which is how a client starts a program too
         start = f"Start-Process -FilePath {_ps(argv[0])}"
         if argv[1:]:
-            start += f" -ArgumentList {_ps(subprocess.list2cmdline(argv[1:]))}"
+            # argv[1:] are command-line tokens as written (see executor._argv)
+            start += f" -ArgumentList {_ps(' '.join(argv[1:]))}"
         start += f" -WorkingDirectory {_ps(cwd)}"
         if wait:
             body = f"$p = {start} -NoNewWindow -Wait -PassThru; exit $p.ExitCode"

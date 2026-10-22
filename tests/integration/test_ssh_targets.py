@@ -4,7 +4,8 @@ BFASR_SSH_POSIX_HOST=user@host   a macOS or Linux machine with qna
 BFASR_SSH_BECOME=1               run under sudo -n there (macOS qna needs root)
 BFASR_SSH_WINDOWS_HOST=user@host a Windows machine with qna
 
-These change files on the target, in a temp folder they remove afterwards.
+These change files on the target, all inside a temp folder they remove
+afterwards (sandboxes included).
 """
 
 import json
@@ -43,10 +44,11 @@ def j(host, *parts):
     return str(host.pure(*parts))
 
 
-def invoke(tmp_path, env, script, *args):
+def invoke(tmp_path, env, script, sandbox, *args):
+    """Run the CLI with its sandbox inside the fixture's scratch folder, so it is removed."""
     p = tmp_path / "a.bas"
     p.write_text(script)
-    argv = [str(p), "--json", "--ssh", os.environ[env], *args]
+    argv = [str(p), "--json", "--ssh", os.environ[env], "--sandbox", sandbox, *args]
     if become(env):
         argv.append("--become")
     r = runner.invoke(cli.app, argv)
@@ -83,18 +85,22 @@ def test_run_waits_and_returns_the_exit_code(target):
 
 
 def test_dry_run_on_the_target_sees_its_own_sandbox(target, tmp_path):
-    env, _, _ = target
+    env, host, scratch = target
+    outside = j(host, scratch, "outside.txt")
     r, data = invoke(
         tmp_path,
         env,
         "createfile until E\nhello\nE\n"
         'continue if {exists file "__createfile" of client folder of current site}\n'
-        'parameter "os" = "{name of operating system}"\n',
+        'parameter "os" = "{name of operating system}"\n'
+        f'copy __createfile "{outside}"\n',
+        j(host, scratch, "sb"),
     )
     assert r.exit_code == 0, r.output
     assert data["status"] == "completed"
     assert data["sandbox_mode"] == "full"
     assert data["target"] == os.environ[env]
+    assert not host.exists(outside)  # a dry run changes nothing outside its sandbox
 
 
 def test_execute_changes_real_files_on_the_target(target, tmp_path):
@@ -116,10 +122,9 @@ def test_execute_changes_real_files_on_the_target(target, tmp_path):
             f'wait /bin/sh "{real}/job.sh"\n'
             "continue if {exit code of action = 3}\n"
         )
-    r, data = invoke(tmp_path, env, script, "--execute")
+    r, data = invoke(tmp_path, env, script, j(host, scratch, "sb"), "--execute")
     assert r.exit_code == 0, r.output
     assert data["sandbox_mode"] == "client"
     assert host.is_file(j(host, real, "job.cmd" if host.windows else "job.sh"))
     # the job ran in the sandboxed site folder, on the target
     assert host.is_file(j(host, data["sandbox"], "site", "ran.txt"))
-    host.delete_tree(data["sandbox"])

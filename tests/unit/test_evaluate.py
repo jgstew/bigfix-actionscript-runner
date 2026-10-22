@@ -84,5 +84,5 @@ def test_overrides_short_circuit_qna():
 
 
 def test_become_for_ssh_targets_that_need_root():
-    assert make_target(ssh="jgstew@mini", become=True).become is True
-    assert make_target(ssh="jgstew@mini").become is None  # left to bigfix-remote-client-relevance
+    assert make_target(ssh="user@mini", become=True).become is True
+    assert make_target(ssh="user@mini").become is None  # left to bigfix-remote-client-relevance

@@ -117,10 +117,10 @@ def test_run_keeps_arguments_with_spaces_and_quotes(host, tmp_path):
 def test_run_without_wait_returns_at_once(host, tmp_path):
     start = time.monotonic()
     code = host.run(
-        ["/bin/sh", "-c", "sleep 0.3; echo done > late.txt"], cwd=str(tmp_path), wait=False
+        ["/bin/sh", "-c", "sleep 3; echo done > late.txt"], cwd=str(tmp_path), wait=False
     )
     assert code == 0
-    assert time.monotonic() - start < 0.3
+    assert time.monotonic() - start < 2  # generous: only "didn't wait 3 s" matters
     deadline = time.monotonic() + 10
     while not host.exists(p(host, tmp_path, "late.txt")) and time.monotonic() < deadline:
         time.sleep(0.05)

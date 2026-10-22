@@ -5,12 +5,15 @@ client  (--execute)  only the client folders are in the sandbox; other paths are
 off     (--execute --no-sandbox)  the real client's folders; everything is real
 """
 
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
 from bigfix_actionscript_runner.host import LocalHost
 from bigfix_actionscript_runner.sandbox import Sandbox
+
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX paths on a POSIX LocalHost")
 
 
 class PathOnlyHost:
@@ -62,6 +65,7 @@ def test_paths_already_inside_the_sandbox_stay(tmp_path):
     assert sb.resolve(inside) == inside
 
 
+@posix_only
 def test_other_absolute_posix_paths_go_under_fs(tmp_path):
     sb = Sandbox(tmp_path)
     assert sb.resolve("/tmp/run_scan.sh") == j(sb.fs, "tmp", "run_scan.sh")
@@ -126,6 +130,7 @@ def test_client_mode_keeps_client_folders_in_the_sandbox(tmp_path):
     assert Path(sb.data, "__Global", "Logs").is_dir()
 
 
+@posix_only
 def test_client_mode_leaves_other_absolute_paths_real(tmp_path):
     sb = Sandbox(tmp_path / "sb", mode="client")
     real = j(tmp_path, "real", "x.sh")
@@ -134,6 +139,7 @@ def test_client_mode_leaves_other_absolute_paths_real(tmp_path):
     assert not sb.contains(real)
 
 
+@posix_only
 def test_client_mode_reads_are_real_too(tmp_path):
     sb = Sandbox(tmp_path / "sb", mode="client")
     assert sb.resolve_read("/etc/hosts") == "/etc/hosts"
@@ -148,6 +154,7 @@ def test_client_mode_has_no_fs_folder(tmp_path):
 # --- off (--execute --no-sandbox): the real client folders ----------------------
 
 
+@posix_only
 def test_off_mode_uses_the_real_client_folders(tmp_path):
     site, data = tmp_path / "BES" / "__BESData" / "MySite", tmp_path / "BES" / "__BESData"
     site.mkdir(parents=True)

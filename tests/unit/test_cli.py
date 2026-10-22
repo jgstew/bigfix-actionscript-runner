@@ -1,6 +1,7 @@
 """The command line, with the relevance evaluator replaced by a fake."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -141,7 +142,7 @@ def test_ssh_target_and_options_reach_the_evaluator(tmp_path, fake):
         [
             str(write(tmp_path)),
             "--ssh",
-            "jgstew@winbox",
+            "user@winbox",
             "--timeout",
             "15",
             "--set",
@@ -152,13 +153,13 @@ def test_ssh_target_and_options_reach_the_evaluator(tmp_path, fake):
     )
     assert fake["builds"] == [
         {
-            "ssh": "jgstew@winbox",
+            "ssh": "user@winbox",
             "timeout_s": 15.0,
             "overrides": {"name of operating system": "Win2022"},
         },
     ]  # one evaluator: the sandbox is on the target, where qna can see it
-    assert fake["hosts"] == [{"ssh": "jgstew@winbox", "become": False}]
-    assert "jgstew@winbox" in r.output
+    assert fake["hosts"] == [{"ssh": "user@winbox", "become": False}]
+    assert "user@winbox" in r.output
 
 
 def test_set_keeps_equals_signs_in_the_expression(tmp_path, fake):
@@ -180,14 +181,15 @@ def test_set_needs_the_arrow(tmp_path, fake):
     assert r.exit_code == 2
 
 
+@pytest.mark.skipif(os.name == "nt", reason="runs /bin/sh")
 def test_execute_with_ssh_runs_on_the_target(tmp_path, fake):
-    r = runner.invoke(
-        cli.app,
-        [str(write(tmp_path)), "--ssh", "u@h", "--execute", "--sandbox", str(tmp_path / "sb")],
-    )
+    script = write(tmp_path, "a.bas", 'wait /bin/sh -c "echo ran > proof.txt"\n')
+    sb = tmp_path / "sb"
+    r = runner.invoke(cli.app, [str(script), "--ssh", "u@h", "--execute", "--sandbox", str(sb)])
     assert r.exit_code == 0, r.output
     assert fake["hosts"] == [{"ssh": "u@h", "become": False}]
-    assert "done" in r.output  # /bin/echo really ran
+    # the command really ran, in the site folder (the "target" here is this machine)
+    assert (sb / "site" / "proof.txt").read_text() == "ran\n"
 
 
 def test_param_must_be_name_equals_value(tmp_path, fake):
@@ -231,7 +233,8 @@ def test_load_error_exits_2(tmp_path, fake):
 
 
 def test_default_sandbox_is_created_and_reported(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    # tempfile caches its folder, so TMPDIR alone wouldn't keep this out of the real one
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
     r = runner.invoke(cli.app, [str(write(tmp_path, "a.bas", "delete a\n"))])
     assert r.exit_code == 0, r.output
     assert "Sandbox (everything; dry run):" in r.output
@@ -298,14 +301,14 @@ def test_become_is_passed_to_the_ssh_evaluator_only(tmp_path, fake):
         [
             str(write(tmp_path)),
             "--ssh",
-            "jgstew@mini",
+            "user@mini",
             "--become",
             "--sandbox",
             str(tmp_path / "sb"),
         ],
     )
     assert fake["builds"][0]["become"] is True
-    assert fake["hosts"] == [{"ssh": "jgstew@mini", "become": True}]
+    assert fake["hosts"] == [{"ssh": "user@mini", "become": True}]
 
 
 def test_not_relevant_is_called_out_but_still_simulated(tmp_path, fake):
@@ -467,3 +470,67 @@ def test_the_host_is_closed_after_the_run(tmp_path, fake, monkeypatch):
     monkeypatch.setattr(cli, "build_host", lambda ssh, become=False: Tracked())
     runner.invoke(cli.app, [str(write(tmp_path)), "--sandbox", str(tmp_path / "sb")])
     assert closed == [True]
+
+
+# --- from the review ---------------------------------------------------------------
+
+
+def test_set_answers_expressions_as_the_action_wrote_them(tmp_path, fake):
+    script = write(
+        tmp_path,
+        "a.bas",
+        'continue if {exists file "x" of client folder of current site}\n',
+    )
+    r = runner.invoke(
+        cli.app,
+        [
+            str(script),
+            "--set",
+            'exists file "x" of client folder of current site=>True',
+            "--sandbox",
+            str(tmp_path / "sb"),
+        ],
+    )
+    assert r.exit_code == 0, r.output
+
+
+def test_become_needs_ssh(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--become"])
+    assert r.exit_code == 2 and "--ssh" in r.output
+
+
+def test_site_needs_no_sandbox(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--site", "S"])
+    assert r.exit_code == 2 and "--no-sandbox" in r.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--no-sandbox", "--site", "S"],  # usage
+        ["--set", "x=1"],  # bad option value
+    ],
+)
+def test_json_usage_errors_are_json(tmp_path, fake, args):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--json", *args])
+    assert r.exit_code == 2
+    data = json.loads(r.output)
+    assert data["status"] == "error" and data["message"]
+
+
+def test_json_load_errors_are_json(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path, "x.bes", "<BES><Analysis/></BES>")), "--json"])
+    assert r.exit_code == 2
+    assert json.loads(r.output)["status"] == "error"
+
+
+def test_json_connection_errors_are_json(tmp_path, fake, monkeypatch):
+    from bigfix_actionscript_runner.host import HostError
+
+    def build_host(ssh, become=False):
+        raise HostError("could not connect")
+
+    monkeypatch.setattr(cli, "build_host", build_host)
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--json", "--ssh", "u@h"])
+    assert r.exit_code == 2
+    assert "could not connect" in json.loads(r.output)["message"]

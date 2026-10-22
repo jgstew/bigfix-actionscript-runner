@@ -60,6 +60,19 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "version: $version"
 
+      # PyPI rejects packages with direct URL (git) dependencies, such as
+      # pre-commit-bigfix until it is published. Fail here, before a tag or a
+      # GitHub release exists, rather than at the publish step after them.
+      - name: Refuse to publish what PyPI would reject
+        if: vars.PYPI_PUBLISH == 'true'
+        run: |
+          if python3 -c 'import pathlib, sys, tomllib; deps = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["dependencies"]; sys.exit(any(" @ " in d for d in deps))'; then
+            echo "no direct URL dependencies"
+          else
+            echo "::error::pyproject.toml has a direct URL dependency, which PyPI rejects; unset PYPI_PUBLISH or publish that dependency first"
+            exit 1
+          fi
+
       # Release only if this version has no tag yet. This is what makes the
       # workflow idempotent and safe to re-run.
       - name: Check whether v<version> is already tagged
@@ -116,7 +129,7 @@ jobs:
           python-version: "3.13"
 
       # same awk-from-.pre-commit-config.yaml source of truth as
-      # .github/workflows/test.yaml and pre-commit.yaml
+      # .github/workflows/pre-commit.yaml
       - name: read uv version from .pre-commit-config.yaml
         run: |
           UV_VERSION="$(awk '

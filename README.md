@@ -29,11 +29,9 @@ the action so its changes can be measured.
   (size, SHA-1, SHA-256), then put in the target's `__Download` and hashed
   again there.
 
-```bash
-uvx bigfix-actionscript-runner "Scan for PHP Installs with YARA-X - macOS.bes"
-```
-
-Until it is published, run it from a checkout:
+Once it is on PyPI (see below), it will run with
+`uvx bigfix-actionscript-runner "Scan for PHP Installs with YARA-X - macOS.bes"`.
+Until then, run it from a checkout:
 
 ```bash
 uvx --from ~/Projects/bigfix-actionscript-runner bigfix-actionscript-runner path/to/task.bes
@@ -86,12 +84,12 @@ Completed
 |---|---|
 | `--action ID` | Which action of a Fixlet/Task (default: the DefaultAction). |
 | `--ssh USER@HOST` | Run on that machine over SSH: relevance, sandbox, file commands and commands. |
-| `--become` | On a macOS/Linux `--ssh` target, run `qna`, file commands and commands under `sudo -n` (a client runs actions as root; macOS `qna` needs it). Needs passwordless sudo. |
+| `--become` | On a macOS/Linux `--ssh` target, run `qna`, file commands and commands under `sudo -n` (a client runs actions as root; macOS `qna` needs it). Needs passwordless sudo. Only with `--ssh`. |
 | `--execute` | Really run the action: commands run, and paths outside the client folders are the real ones. |
 | `--no-sandbox` | With `--execute`: use the real client's folders as well. Needs `--site`. |
 | `--site NAME` | With `--no-sandbox`: the site whose client folder is "the current site". |
 | `--param NAME=VALUE` | Value for an `action parameter query` (repeatable). Otherwise its default is used. |
-| `--set 'EXPR=>VALUE'` | Fixed answer for an expression (repeatable), e.g. for an inspector the target doesn't have. |
+| `--set 'EXPR=>VALUE'` | Fixed answer for an expression as written in the action (repeatable), e.g. for an inspector the target doesn't have. |
 | `--exit-code N` | Exit code assumed for `wait` commands that aren't run (default 0). |
 | `--relevance` | Also evaluate the item's own relevance clauses first; says so if a client wouldn't run the action. |
 | `--no-baseline` | Skip the up-front evaluation of every expression (each is still evaluated at its step). |
@@ -103,7 +101,7 @@ Completed
 
 Exit codes: `0` the action completed (or ran `exit`), `1` it failed (the
 message names the line), `2` usage, load or connection error, `3` preflight
-errors.
+errors. With `--json`, errors are JSON too: `{"status": "error", "message": ...}`.
 
 ## Sandbox modes
 
@@ -128,6 +126,11 @@ The sandbox's layout:
   __BESData/          data folder of client (__Global/Logs, ...)
   fs/                 dry run only: any other absolute path, /tmp/x -> fs/tmp/x, C:\x -> fs/C/x
 ```
+
+Prefetch and `download as` names must be plain file names (no `/`, `\`,
+`:` or `..`): they come from the .bes file and land in `__Download`. On a
+Windows target a rooted path such as `\Temp\x` is on the site folder's drive,
+`\\?\C:\x` is `C:\x`, and a `:` inside a sandboxed path can't switch drives.
 
 In a dry run, reads (the source of a `copy`) fall back to the real file when
 the sandbox has no copy of it, so an action can copy real files in, and a
@@ -202,7 +205,7 @@ doesn't check TLS certificates (the hashes are checked afterwards). A
 | `copy`, `move`, `delete`, `folder create`, `folder delete` | At the paths the sandbox mode gives; `copy`/`move` fail if the source is missing or the destination exists. |
 | `if`/`elseif`/`else`/`endif`, `continue if`, `exit`, `pause while` | Evaluated; `pause while` only warns. |
 | `prefetch`, `add prefetch item`, `download`, `begin/end prefetch block` | Handled before line 1 (including `if` in the block); `download now` at its line. |
-| `run`, `wait`, `waithidden`, `runhidden`, `rundetached`, `dos`, `script`, `override` | Shown, or run with `--execute` from the site folder (with the `override` timeout). |
+| `run`, `wait`, `waithidden`, `runhidden`, `rundetached`, `dos`, `script`, `override` | Shown, or run with `--execute` from the site folder (with the `override` timeout). On Windows the arguments are passed exactly as written, for the program to parse, and `dos` runs through `cmd.exe /c`. |
 | `action uses wow64 redirection`, `action requires restart`, `setting`, `regset`, `regdelete`, `notify client`, `utility`, ... | Recorded, not performed. |
 | Anything else | A warning; the action continues. |
 

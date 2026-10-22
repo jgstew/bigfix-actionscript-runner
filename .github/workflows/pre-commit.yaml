@@ -8,7 +8,7 @@ on:
       - main
   workflow_dispatch:
 
-# read-only by default; the cross-repo checkout uses secrets.CROSSREPO_PAT
+# read-only by default
 permissions:
   contents: read
 
@@ -108,15 +108,9 @@ jobs:
         with:
           extra_args: --color=always --all-files --hook-stage manual
 
-      # `restore-keys` above means a config change restores the previous cache
-      # and then saves it back under the new key - so every hook rev bump would
-      # otherwise leave its old environment in the cache forever.
-      # gc deletes exactly the
-      # environments no live config references. Last step in the job on purpose:
-      # actions/cache saves in its post step, which runs after this, so what
-      # gets uploaded is the pruned store. No `if:` - the default success()
-      # matches the cache action's own `post-if: success()`, so this runs in
-      # precisely the cases where a save follows. `pre-commit` is on PATH from
-      # the shared action's `python -m pip install pre-commit`.
+      # pre-commit/action caches the hook environments; gc removes the ones
+      # no current config uses before that cache is saved (in the action's
+      # post step, which runs after this one). `pre-commit` is on PATH from
+      # the action's own `python -m pip install pre-commit`.
       - name: prune unused hook environments before the cache is saved
         run: pre-commit gc

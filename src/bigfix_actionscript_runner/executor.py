@@ -17,7 +17,7 @@ from pathlib import Path
 from .host import HostError
 from .prefetch import AUTO, Downloader, PrefetchError, PrefetchItem, fetch, parse_prefetch
 from .rewrite import ActionContext, rewrite
-from .sandbox import Sandbox
+from .sandbox import Sandbox, SandboxEscape
 from .substitution import Evaluator, SubstitutionError, find_expressions, substitute
 
 Runner = Callable[..., int]
@@ -110,6 +110,15 @@ _NOOP_PREFIXES = (
 )
 
 
+def _starts(low: str, keyword: str) -> bool:
+    """`low` starts with the keyword followed by whitespace (a space or a tab)."""
+    return low.startswith(keyword) and low[len(keyword) : len(keyword) + 1] in (" ", "\t")
+
+
+def _after(text: str, keyword: str) -> str:
+    return text[len(keyword) :].strip()
+
+
 @dataclass
 class _Frame:
     active: bool
@@ -131,6 +140,7 @@ class Simulator:
         runner: Runner | None = None,
         downloader: Downloader | None = AUTO,
         baseline: bool = False,
+        overrides: dict[str, str] | None = None,
     ) -> None:
         if not execute and sandbox.mode != "full":
             raise ValueError(
@@ -149,6 +159,8 @@ class Simulator:
         self.runner: Runner = runner if runner is not None else self.host.run
         self.downloader = downloader
         self._override: dict[str, str] | None = None
+        # --set answers, matched against the expression as the action wrote it
+        self.overrides = dict(overrides or {})
         self.baseline = baseline
         self._baseline: dict[str, BaselineEntry] = {}
         self._pending: list[Evaluation] = []
@@ -165,6 +177,8 @@ class Simulator:
         )
 
     def _eval(self, expr: str) -> list[str]:
+        if expr.strip() in self.overrides:
+            return [self.overrides[expr.strip()]]
         return self._evaluate(rewrite(expr, self._context()))
 
     def _eval_recorded(self, expr: str) -> list[str]:
@@ -226,7 +240,7 @@ class Simulator:
             try:
                 try:
                     i = self._line(text, lineno, lines, i, stack, active)
-                except HostError as e:
+                except (HostError, SandboxEscape) as e:
                     raise LineError(str(e)) from e
             except LineError as e:
                 self._step(lineno, text, "failed", detail=str(e))
@@ -298,13 +312,22 @@ class Simulator:
         """Download prefetch items before line 1. Returns line indexes it consumed."""
         handled: set[int] = set()
         in_block = False
+        block_start = 0
         stack: list[_Frame] = []
+        body_end: str | None = None  # inside a createfile body: text, not ActionScript
         for idx, raw in enumerate(lines):
             text = raw.strip()
             low = text.lower()
             lineno = first_line + idx
+            if body_end is not None:
+                if text == body_end:
+                    body_end = None
+                continue
+            if not in_block and low.startswith(("createfile until ", "createfile until\t")):
+                body_end = text.split(None, 2)[2].strip()
+                continue
             if low == "begin prefetch block":
-                in_block = True
+                in_block, block_start = True, lineno
                 handled.add(idx)
                 continue
             if in_block:
@@ -329,30 +352,39 @@ class Simulator:
                 except LineError as e:
                     self._step(lineno, text, "failed", detail=str(e))
                     raise LineError(lineno, str(e)) from e
+        if in_block:
+            message = "begin prefetch block without end prefetch block"
+            self._step(block_start, "begin prefetch block", "failed", detail=message)
+            raise LineError(block_start, message)
         return handled
 
     def _block_line(self, text: str, lineno: int, stack: list[_Frame]) -> None:
         low = text.lower()
         active = not stack or stack[-1].active
-        if low.startswith("if "):
-            cond = active and self._bool(text[3:])
+        if _starts(low, "if"):
+            cond = active and self._bool(_after(text, "if"))
             stack.append(_Frame(cond, cond or not active, active))
-        elif low.startswith("elseif "):
+        elif _starts(low, "elseif") or low in ("else", "endif"):
+            if not stack:
+                raise LineError(f"{low.split()[0]} without if")
             top = stack[-1]
-            cond = top.parent_active and not top.taken and self._bool(text[7:])
-            top.active, top.taken = cond, top.taken or cond
-        elif low == "else":
-            top = stack[-1]
-            top.active, top.taken = top.parent_active and not top.taken, True
-        elif low == "endif":
-            stack.pop()
+            if low == "endif":
+                stack.pop()
+            elif low == "else":
+                top.active, top.taken = top.parent_active and not top.taken, True
+            else:
+                cond = top.parent_active and not top.taken and self._bool(_after(text, "elseif"))
+                top.active, top.taken = cond, top.taken or cond
         elif active and low.startswith(("add prefetch item", "add nohash prefetch item")):
             self._fetch(self._sub(text), lineno, text)
         elif active:
             self._step(lineno, text, "warning", detail="not simulated in a prefetch block")
 
     def _fetch(self, substituted: str, lineno: int, text: str) -> None:
-        item = parse_prefetch(substituted)
+        try:
+            item = parse_prefetch(substituted)
+        except PrefetchError as e:
+            raise LineError(str(e)) from e
         if item is None:
             raise LineError(f"can't parse prefetch/download statement: {substituted}")
         download = self.sandbox.resolve("__Download")
@@ -387,14 +419,14 @@ class Simulator:
         low = text.lower()
 
         # control flow first: it decides whether anything else runs
-        if low.startswith("if "):
-            cond = active and self._bool(text[3:])
+        if _starts(low, "if"):
+            cond = active and self._bool(_after(text, "if"))
             stack.append(_Frame(cond, cond or not active, active))
             self._step(
                 lineno, text, "ok" if active else "skipped", detail=str(cond) if active else ""
             )
             return i
-        if low.startswith("elseif ") or low == "else" or low == "endif":
+        if _starts(low, "elseif") or low == "else" or low == "endif":
             if not stack:
                 raise LineError(f"{low.split()[0]} without if")
             top = stack[-1]
@@ -403,7 +435,7 @@ class Simulator:
             elif low == "else":
                 top.active, top.taken = top.parent_active and not top.taken, True
             else:
-                cond = top.parent_active and not top.taken and self._bool(text[7:])
+                cond = top.parent_active and not top.taken and self._bool(_after(text, "elseif"))
                 top.active, top.taken = cond, top.taken or cond
             self._step(lineno, text, "ok")
             return i
@@ -500,7 +532,7 @@ class Simulator:
             target = self.sandbox.resolve(args[0] if args else "")
             if low.startswith("folder create "):
                 self.host.mkdir(target)
-            elif target not in self.sandbox.protected and self.host.is_dir(target):
+            elif not self.sandbox.is_protected(target) and self.host.is_dir(target):
                 self.host.delete_tree(target)
             self._step(lineno, text, "ok", sub, self.sandbox.display(target))
             return i
@@ -531,8 +563,13 @@ class Simulator:
 
         if low == "exit" or low.startswith("exit "):
             sub = self._sub(text)
+            words = sub.split()
+            try:
+                code = int(words[1]) if len(words) > 1 else 0
+            except ValueError as e:
+                raise LineError(f"exit needs a number: {words[1]!r}") from e
             self._step(lineno, text, "ok", sub)
-            raise _Exit(int(sub.split()[1]) if len(sub.split()) > 1 else 0)
+            raise _Exit(code)
 
         if low.startswith("override "):
             # `override wait` is followed by key=value lines up to the command it applies to
@@ -568,8 +605,14 @@ class Simulator:
         sub = self._sub(text)
         command = sub[len(cmd) :].strip()
         override, self._override = self._override or {}, None
-        timeout = float(override["timeout_seconds"]) if "timeout_seconds" in override else None
+        try:
+            timeout = float(override["timeout_seconds"]) if "timeout_seconds" in override else None
+        except ValueError as e:
+            raise LineError(
+                f"timeout_seconds is not a number: {override['timeout_seconds']!r}"
+            ) from e
         wait = _WAITS[cmd]
+        argv = self._argv(cmd, command)  # also checks the command line in a dry run
         if not self.execute:
             if wait:
                 self.exit_code = self.assumed_exit_code
@@ -581,40 +624,65 @@ class Simulator:
                 f"not run (exit code {self.exit_code} assumed)" if wait else "not run",
             )
             return
-        argv = self._argv(command)
-        code = self.runner(
-            argv, cwd=self.sandbox.site, wait=wait, timeout=int(timeout) if timeout else None
-        )
+        code = self.runner(argv, cwd=self.sandbox.site, wait=wait, timeout=timeout)
         if wait:
             self.exit_code = code
         self._step(
             lineno, text, "ok", sub, f"exit code {code}" if wait else "started, not waited for"
         )
 
-    def _argv(self, command: str) -> list[str]:
+    def _argv(self, cmd: str, command: str) -> list[str]:
         """Split a command line, swapping absolute paths that exist in the sandbox.
 
         Only a dry run's sandbox remaps other absolute paths; with --execute
         they resolve to themselves and stay as written.
+
+        On a Windows host argv[0] is the program and argv[1:] are the rest of
+        the command line's tokens exactly as written (quotes kept): a Windows
+        program parses its own command line, so re-quoting them would change
+        what it gets (`TARGETDIR="C:\\x y"`). `dos` runs through cmd.exe, as on
+        a client.
         """
         if self.host.windows:
-            # a Windows command line: "quoted" arguments, backslashes are literal
-            argv = [
-                a[1:-1] if len(a) > 1 and a[0] == a[-1] == '"' else a for a in split_win(command)
-            ]
-        else:
+            if cmd == "dos":
+                return ["cmd.exe", "/c", command]
+            tokens = split_win(command)
+            if not tokens:
+                raise LineError(f"{cmd} needs a command")
+            program, rest = _unquote(tokens[0]), tokens[1:]
+            return [self._remap(program), *[_requote(t, self._remap(_unquote(t))) for t in rest]]
+        try:
             argv = shlex.split(command)
-        out = []
-        for arg in argv:
-            is_abs = arg.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", arg)
-            mapped = self.sandbox.resolve(arg) if is_abs else arg
-            out.append(mapped if mapped != arg and self.host.exists(mapped) else arg)
-        return out
+        except ValueError as e:
+            raise LineError(f"can't split the command line: {e}") from e
+        if not argv:
+            raise LineError(f"{cmd} needs a command")
+        return [self._remap(arg) for arg in argv]
+
+    def _remap(self, arg: str) -> str:
+        if not (arg.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", arg)):
+            return arg
+        try:
+            mapped = self.sandbox.resolve(arg)
+        except SandboxEscape:
+            return arg
+        return mapped if mapped != arg and self.host.exists(mapped) else arg
 
 
 class _Exit(Exception):
     def __init__(self, code: int) -> None:
         self.code = code
+
+
+def _unquote(token: str) -> str:
+    return token[1:-1] if len(token) > 1 and token[0] == token[-1] == '"' else token
+
+
+def _requote(token: str, value: str) -> str:
+    """`token` with its value replaced (when remapped), keeping its quotes."""
+    if value == _unquote(token):
+        return token
+    return f'"{value}"'
 
 
 def split_win(command: str) -> list[str]:

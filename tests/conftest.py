@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 
 import pytest
@@ -124,8 +125,15 @@ def shell_host():
 def _live_qna_status() -> tuple[bool, str]:
     from bigfix_remote_client_relevance.qna_paths import find_qna_path
 
-    if find_qna_path() is None:
+    qna = find_qna_path()
+    if qna is None:
         return False, "no local qna binary found"
+    if sys.platform == "darwin" and os.geteuid() != 0:
+        # bigfix-remote-client-relevance runs macOS qna under `sudo -n`; `-l` asks
+        # whether that is allowed without running it (sudoers rules are often qna-only)
+        sudo = subprocess.run(["sudo", "-n", "-l", qna], capture_output=True, check=False)
+        if sudo.returncode != 0:
+            return False, "macOS qna needs root: passwordless sudo, or sudo -E uv run pytest"
     return True, ""
 
 

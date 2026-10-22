@@ -1,6 +1,7 @@
 """The executor: ActionScript semantics against a sandbox, with a fake evaluator."""
 
 import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import pytest
 from bigfix_actionscript_runner.executor import Simulator
 from bigfix_actionscript_runner.sandbox import Sandbox
 from bigfix_actionscript_runner.substitution import SubstitutionError
+
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX paths on a POSIX LocalHost")
 
 
 def fake_evaluator(answers=None, calls=None):
@@ -121,6 +124,7 @@ def test_unterminated_createfile_fails(tmp_path):
     assert "END" in r.message
 
 
+@posix_only
 def test_copy_into_absolute_path_lands_in_the_sandbox(tmp_path):
     sb, s = sim(tmp_path)
     r = s.run('createfile until E\nx\nE\ncopy __createfile "/tmp/run scan.sh"\n')
@@ -167,6 +171,36 @@ def test_folder_create_and_delete(tmp_path):
     r = s.run('folder create "/opt/x y/z"\nfolder delete "/opt/x y"\nfolder delete "/never"\n')
     assert r.status == "completed"
     assert not (Path(sb.fs) / "opt" / "x y").exists()
+
+
+def test_a_dry_run_never_creates_real_folders(tmp_path):
+    real = tmp_path / "real dir"
+    sb, s = sim(tmp_path)
+    r = s.run(f'folder create "{real}/z"\n')
+    assert r.status == "completed"
+    assert not real.exists()
+    assert sb.contains(sb.resolve(str(real / "z")))
+
+
+@posix_only
+def test_a_dry_run_on_an_ssh_target_changes_nothing_outside_the_sandbox(tmp_path, shell_host):
+    """The same dry run through SSHHost: every write stays in the target's sandbox."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    sb = Sandbox(str(tmp_path / "remote-sb"), host=shell_host)
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c")
+    r = s.run(
+        "createfile until E\nx\nE\n"
+        f'copy __createfile "{outside}/new.txt"\n'
+        f'delete "{outside}/keep.txt"\n'
+        f'folder create "{outside}/made"\n'
+        f'folder delete "{outside}"\n'
+        f'move "{outside}/keep.txt" "{outside}/moved.txt"\n'
+        f'wait /bin/sh -c "touch {outside}/ran"\n'
+    )
+    assert r.status == "completed", r.message
+    assert sorted(p.name for p in outside.iterdir()) == ["keep.txt"]
 
 
 def test_delete_of_absolute_path_only_touches_the_sandbox(tmp_path):
@@ -252,6 +286,7 @@ def test_exit_code_of_action_uses_the_assumed_code(tmp_path):
     assert "5 = 0" in calls
 
 
+@posix_only
 def test_execute_runs_waits_with_real_exit_code_and_remaps_paths(tmp_path):
     ran = []
 
@@ -660,8 +695,38 @@ def test_windows_commands_are_split_like_a_windows_command_line(tmp_path):
     s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", execute=True)
     r = s.run('wait "C:\\Program Files\\App\\app.exe" /S "/D=C:\\x y"\n')
     assert r.status == "completed", r.message
+    # the program unquoted; the rest exactly as written, for the program to parse
     assert host.ran == [
-        (["C:\\Program Files\\App\\app.exe", "/S", "/D=C:\\x y"], "C:\\T\\sb\\site")
+        (["C:\\Program Files\\App\\app.exe", "/S", '"/D=C:\\x y"'], "C:\\T\\sb\\site")
+    ]
+
+
+def test_windows_arguments_keep_their_own_quoting(tmp_path):
+    from pathlib import PureWindowsPath
+
+    class WindowsShapedHost:
+        windows, pure, name = True, PureWindowsPath, "win"
+
+        def __init__(self) -> None:
+            self.ran = []
+
+        def mkdir(self, path):
+            pass
+
+        def exists(self, path):
+            return False
+
+        def run(self, argv, *, cwd, wait, timeout=None):
+            self.ran.append(argv)
+            return 0
+
+    host = WindowsShapedHost()
+    sb = Sandbox("C:\\T\\sb", host=host, mode="client")
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", execute=True)
+    s.run('wait msiexec /i "C:\\a b.msi" TARGETDIR="C:\\x y"\ndos echo a > b.txt\n')
+    assert host.ran == [
+        ["msiexec", "/i", '"C:\\a b.msi"', 'TARGETDIR="C:\\x y"'],
+        ["cmd.exe", "/c", "echo a > b.txt"],
     ]
 
 

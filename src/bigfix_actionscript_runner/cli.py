@@ -3,7 +3,7 @@
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import platformdirs
 import typer
@@ -233,22 +233,18 @@ def simulate(
     timeout: Annotated[float, typer.Option(help="Seconds per relevance evaluation")] = 60.0,
 ) -> None:
     """Simulate one action: real relevance substitution, file commands in a sandbox."""
-    if no_sandbox and not execute:
-        print("--no-sandbox needs --execute: a dry run never touches the real client folders.")
-        raise typer.Exit(EXIT_USAGE)
-    if no_sandbox and not site:
-        print("--no-sandbox needs --site NAME: whose client folder is the current site's.")
-        raise typer.Exit(EXIT_USAGE)
-    if no_sandbox and sandbox_dir:
-        print("--no-sandbox and --sandbox contradict each other.")
-        raise typer.Exit(EXIT_USAGE)
-    params = _params(param or [])
-    overrides = _overrides(set_ or [])
+    problem = _usage_problem(execute, no_sandbox, site, sandbox_dir, ssh, become)
+    if problem:
+        _fail(as_json, problem)
+    try:
+        params = _params(param or [])
+        overrides = _overrides(set_ or [])
+    except typer.BadParameter as e:
+        _fail(as_json, f"{e.param_hint}: {e.message}")
     try:
         action = load_action(path, action_id)
     except LoadError as e:
-        print(f"Can't load {path}: {e}")
-        raise typer.Exit(EXIT_USAGE) from e
+        _fail(as_json, f"Can't load {path}: {e}")
 
     pre = None if no_preflight else preflight(path)
     target = ssh or "local"
@@ -269,10 +265,11 @@ def simulate(
     try:
         host = build_host(ssh, become)
     except HostError as e:
-        print(f"Can't reach {target}: {e}")
-        raise typer.Exit(EXIT_USAGE) from e
+        _fail(as_json, f"Can't reach {target}: {e}")
     try:
-        sandbox = _make_sandbox(host, evaluate, execute, no_sandbox, site, sandbox_dir, target)
+        sandbox = _make_sandbox(
+            host, evaluate, execute, no_sandbox, site, sandbox_dir, target, as_json
+        )
         rel = _relevance(action, evaluate) if relevance else None
         simulator = Simulator(
             sandbox,
@@ -283,6 +280,7 @@ def simulate(
             assumed_exit_code=exit_code,
             downloader=None if no_download else AUTO,
             baseline=not no_baseline,
+            overrides=overrides,
         )
         report = simulator.run(action.script, first_line=action.first_line)
     finally:
@@ -294,6 +292,36 @@ def simulate(
     raise typer.Exit(EXIT_FAILED if report.status == "failed" else EXIT_OK)
 
 
+def _usage_problem(
+    execute: bool,
+    no_sandbox: bool,
+    site: str | None,
+    sandbox_dir: str | None,
+    ssh: str | None,
+    become: bool,
+) -> str | None:
+    if no_sandbox and not execute:
+        return "--no-sandbox needs --execute: a dry run never touches the real client folders."
+    if no_sandbox and not site:
+        return "--no-sandbox needs --site NAME: whose client folder is the current site's."
+    if no_sandbox and sandbox_dir:
+        return "--no-sandbox and --sandbox contradict each other."
+    if site and not no_sandbox:
+        return "--site only means something with --no-sandbox."
+    if become and not ssh:
+        return "--become is for --ssh targets; run this tool itself under sudo for a local run."
+    return None
+
+
+def _fail(as_json: bool, message: str, code: int = EXIT_USAGE) -> NoReturn:
+    """Stop with `message`: as a JSON document with --json, so stdout stays parseable."""
+    if as_json:
+        print(json.dumps({"status": "error", "message": message}, indent=2))
+    else:
+        print(message)
+    raise typer.Exit(code)
+
+
 def _make_sandbox(
     host: Host,
     evaluate: Evaluator,
@@ -302,6 +330,7 @@ def _make_sandbox(
     site: str | None,
     sandbox_dir: str | None,
     target: str,
+    as_json: bool,
 ) -> Sandbox:
     try:
         if no_sandbox:
@@ -310,14 +339,12 @@ def _make_sandbox(
                 site_folder = evaluate(f'pathname of client folder of site "{site}"')[0]
                 data_folder = evaluate("pathname of data folder of client")[0]
             except SubstitutionError as e:
-                print(f'No real client folder for site "{site}" on {target}: {e}')
-                raise typer.Exit(EXIT_USAGE) from e
+                _fail(as_json, f'No real client folder for site "{site}" on {target}: {e}')
             return Sandbox(host=host, mode="off", site_folder=site_folder, data_folder=data_folder)
         root = sandbox_dir or host.temp_dir("bigfix-actionscript-runner-")
         return Sandbox(root, host=host, mode="client" if execute else "full")
     except HostError as e:
-        print(f"Can't set up the sandbox on {target}: {e}")
-        raise typer.Exit(EXIT_USAGE) from e
+        _fail(as_json, f"Can't set up the sandbox on {target}: {e}")
 
 
 def _payload(
