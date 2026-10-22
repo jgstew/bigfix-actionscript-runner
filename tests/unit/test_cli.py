@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from bigfix_actionscript_runner import cli
+from bigfix_actionscript_runner.host import LocalHost
 from bigfix_actionscript_runner.substitution import SubstitutionError
 
 runner = CliRunner()
@@ -64,6 +65,13 @@ def fake(monkeypatch):
         return evaluate
 
     monkeypatch.setattr(cli, "build_evaluator", build_evaluator)
+    record["hosts"] = []
+
+    def build_host(ssh, become=False):
+        record["hosts"].append({"ssh": ssh, "become": become})
+        return LocalHost()  # the "target" is this machine, so tests can look at it
+
+    monkeypatch.setattr(cli, "build_host", build_host)
     return record
 
 
@@ -148,9 +156,8 @@ def test_ssh_target_and_options_reach_the_evaluator(tmp_path, fake):
             "timeout_s": 15.0,
             "overrides": {"name of operating system": "Win2022"},
         },
-        # plus a local evaluator for expressions about the sandbox, which the remote can't see
-        {"ssh": None, "timeout_s": 15.0, "overrides": {"name of operating system": "Win2022"}},
-    ]
+    ]  # one evaluator: the sandbox is on the target, where qna can see it
+    assert fake["hosts"] == [{"ssh": "jgstew@winbox", "become": False}]
     assert "jgstew@winbox" in r.output
 
 
@@ -173,10 +180,14 @@ def test_set_needs_the_arrow(tmp_path, fake):
     assert r.exit_code == 2
 
 
-def test_execute_with_ssh_is_refused(tmp_path, fake):
-    r = runner.invoke(cli.app, [str(write(tmp_path)), "--ssh", "h", "--execute"])
-    assert r.exit_code == 2
-    assert "--execute" in r.output
+def test_execute_with_ssh_runs_on_the_target(tmp_path, fake):
+    r = runner.invoke(
+        cli.app,
+        [str(write(tmp_path)), "--ssh", "u@h", "--execute", "--sandbox", str(tmp_path / "sb")],
+    )
+    assert r.exit_code == 0, r.output
+    assert fake["hosts"] == [{"ssh": "u@h", "become": False}]
+    assert "done" in r.output  # /bin/echo really ran
 
 
 def test_param_must_be_name_equals_value(tmp_path, fake):
@@ -223,7 +234,7 @@ def test_default_sandbox_is_created_and_reported(tmp_path, fake, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     r = runner.invoke(cli.app, [str(write(tmp_path, "a.bas", "delete a\n"))])
     assert r.exit_code == 0, r.output
-    assert "Sandbox:" in r.output
+    assert "Sandbox (everything; dry run):" in r.output
 
 
 def test_baseline_is_on_by_default_and_reported(tmp_path, fake):
@@ -293,8 +304,8 @@ def test_become_is_passed_to_the_ssh_evaluator_only(tmp_path, fake):
             str(tmp_path / "sb"),
         ],
     )
-    assert fake["builds"][0]["become"] is True  # the remote one
-    assert "become" not in fake["builds"][1]  # the local sandbox evaluator keeps its default
+    assert fake["builds"][0]["become"] is True
+    assert fake["hosts"] == [{"ssh": "jgstew@mini", "become": True}]
 
 
 def test_not_relevant_is_called_out_but_still_simulated(tmp_path, fake):
@@ -316,3 +327,71 @@ def test_not_relevant_is_called_out_but_still_simulated(tmp_path, fake):
     assert r.exit_code == 0, r.output
     assert "Not relevant on local: a client would not run this action" in r.output
     assert "Completed" in r.output
+
+
+# --- sandbox modes ------------------------------------------------------------------
+
+
+def test_dry_run_reports_a_full_sandbox(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--sandbox", str(tmp_path / "sb")])
+    assert "Sandbox (everything; dry run):" in r.output
+
+
+def test_execute_sandboxes_only_the_client_folders(tmp_path, fake):
+    real = tmp_path / "real"
+    script = write(
+        tmp_path,
+        "a.bas",
+        f'createfile until E\nx\nE\nfolder create "{real}"\ncopy __createfile "{real}/x.txt"\n',
+    )
+    r = runner.invoke(cli.app, [str(script), "--execute", "--sandbox", str(tmp_path / "sb")])
+    assert r.exit_code == 0, r.output
+    assert (real / "x.txt").read_text() == "x\n"
+    assert "Sandbox (client folders only):" in r.output
+    assert "really runs" in r.output
+
+
+def test_no_sandbox_needs_execute(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--no-sandbox", "--site", "S"])
+    assert r.exit_code == 2
+    assert "--execute" in r.output
+
+
+def test_no_sandbox_needs_the_site(tmp_path, fake):
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--no-sandbox", "--execute"])
+    assert r.exit_code == 2
+    assert "--site" in r.output
+
+
+def test_no_sandbox_and_sandbox_dir_conflict(tmp_path, fake):
+    r = runner.invoke(
+        cli.app,
+        [str(write(tmp_path)), "--no-sandbox", "--execute", "--site", "S", "--sandbox", "x"],
+    )
+    assert r.exit_code == 2
+
+
+def test_no_sandbox_uses_the_real_client_folders(tmp_path, fake, monkeypatch):
+    site = tmp_path / "BES" / "__BESData" / "My Site"
+    site.mkdir(parents=True)
+    fixed = {
+        'pathname of client folder of site "My Site"': str(site),
+        "pathname of data folder of client": str(site.parent),
+    }
+    script = write(tmp_path, "a.bas", "createfile until E\nx\nE\n")
+    r = runner.invoke(
+        cli.app,
+        [str(script), "--execute", "--no-sandbox", "--site", "My Site"]
+        + [a for k, v in fixed.items() for a in ("--set", f"{k}=>{v}")],
+    )
+    assert r.exit_code == 0, r.output
+    assert (site / "__createfile").read_text() == "x\n"
+    assert "No sandbox: the real client folders" in r.output
+
+
+def test_no_sandbox_fails_cleanly_without_a_client(tmp_path, fake):
+    r = runner.invoke(
+        cli.app, [str(write(tmp_path)), "--execute", "--no-sandbox", "--site", "Nope"]
+    )
+    assert r.exit_code == 2
+    assert "client folder" in r.output

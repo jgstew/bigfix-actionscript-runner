@@ -1,7 +1,6 @@
 """bigfix-actionscript-runner: dry-run the ActionScript in a .bes (or plain) file."""
 
 import json
-import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -10,6 +9,7 @@ import platformdirs
 import typer
 
 from .executor import Report, Simulator
+from .host import Host, HostError, LocalHost
 from .load import LoadedAction, LoadError, load_action
 from .prefetch import AUTO
 from .preflight import PreflightResult, preflight
@@ -28,6 +28,15 @@ def build_evaluator(
     from .evaluate import QnaEvaluator, make_target
 
     return QnaEvaluator(make_target(ssh, become), timeout_s=timeout_s, overrides=overrides)
+
+
+def build_host(ssh: str | None, become: bool = False) -> Host:
+    """Where the action runs: this machine, or the --ssh target."""
+    if ssh is None:
+        return LocalHost()
+    from .ssh_host import SSHHost
+
+    return SSHHost(ssh, become=become)
 
 
 def _params(values: list[str]) -> dict[str, str]:
@@ -61,17 +70,27 @@ def _relevance(action: LoadedAction, evaluate: Evaluator) -> list[dict[str, str]
     return results
 
 
+def _sandbox_line(sandbox: Sandbox) -> str:
+    if sandbox.mode == "off":
+        return f"No sandbox: the real client folders ({sandbox.site}, {sandbox.data})"
+    label = "everything; dry run" if sandbox.mode == "full" else "client folders only"
+    return f"Sandbox ({label}): {sandbox.root}"
+
+
 def _print_text(
     action: LoadedAction,
     target: str,
-    sandbox: Sandbox,
+    sandbox: Sandbox | None,
     pre: PreflightResult | None,
     relevance: list[dict[str, str]] | None,
     report: Report | None,
 ) -> None:
     print(f"{action.title}" + (f"  [{action.action_id}]" if action.action_id else ""))
-    print(f"Relevance evaluated on: {target}")
-    print(f"Sandbox: {sandbox.root}")
+    print(f"Target: {target}")
+    if sandbox is not None:
+        print(_sandbox_line(sandbox))
+    if sandbox is not None and sandbox.mode != "full":
+        print(f"--execute: this really runs on {target}; files outside the sandbox change")
     if pre is not None:
         print(
             f"Preflight: {pre.checked} relevance expression(s) checked, "
@@ -90,7 +109,7 @@ def _print_text(
                 f"Not relevant on {target}: a client would not run this action "
                 "(simulating it anyway)"
             )
-    if report is None:
+    if report is None or sandbox is None:
         return
     if report.baseline:
         errors = sum(1 for b in report.baseline if b.error)
@@ -100,10 +119,10 @@ def _print_text(
             + (f", {deferred} deferred (use parameters set later)" if deferred else "")
         )
     print()
-    root = str(sandbox.root)
+    root = sandbox.root
 
     def short(text: str) -> str:  # the header names the sandbox once; steps say <sandbox>
-        return text.replace(root, "<sandbox>")
+        return text.replace(root, "<sandbox>") if root else text
 
     shown: set[str] = set()  # each change since the baseline is noted once, where it first shows
     for s in report.steps:
@@ -142,21 +161,40 @@ def simulate(
         str | None, typer.Option("--action", help="Action ID (default: DefaultAction)")
     ] = None,
     ssh: Annotated[
-        str | None, typer.Option(help="Evaluate relevance on USER@HOST over SSH instead of --local")
+        str | None,
+        typer.Option(help="Run on USER@HOST over SSH (relevance, files, commands) instead of here"),
     ] = None,
     become: Annotated[
         bool,
         typer.Option(
             "--become",
-            help="Run qna under sudo on the --ssh target (needed for macOS targets)",
+            help=(
+                "On a POSIX --ssh target, run qna, file commands and commands under sudo -n "
+                "(like a client, as root; macOS qna needs it)"
+            ),
         ),
     ] = False,
     execute: Annotated[
         bool,
         typer.Option(
-            "--execute", help="Really run run/wait/... commands (from the sandbox site folder)"
+            "--execute",
+            help=(
+                "Really run the action: commands run, and paths outside the client "
+                "folders are the real ones"
+            ),
         ),
     ] = False,
+    no_sandbox: Annotated[
+        bool,
+        typer.Option(
+            "--no-sandbox",
+            help="With --execute: use the real client's folders for --site too",
+        ),
+    ] = False,
+    site: Annotated[
+        str | None,
+        typer.Option(help="With --no-sandbox: the site whose client folder is the current site"),
+    ] = None,
     param: Annotated[
         list[str] | None,
         typer.Option(help="Value for action parameter query: NAME=VALUE (repeatable)"),
@@ -173,7 +211,10 @@ def simulate(
         typer.Option("--no-download", help="Placeholder files instead of downloading prefetches"),
     ] = False,
     sandbox_dir: Annotated[
-        Path | None, typer.Option("--sandbox", help="Sandbox folder (default: a new temp folder)")
+        str | None,
+        typer.Option(
+            "--sandbox", help="Sandbox folder on the target (default: a new temp folder there)"
+        ),
     ] = None,
     no_preflight: Annotated[
         bool, typer.Option("--no-preflight", help="Skip the bigfix-relevance-analyzer preflight")
@@ -192,11 +233,14 @@ def simulate(
     timeout: Annotated[float, typer.Option(help="Seconds per relevance evaluation")] = 60.0,
 ) -> None:
     """Simulate one action: real relevance substitution, file commands in a sandbox."""
-    if execute and ssh:
-        print(
-            "--execute can't be combined with --ssh: commands would run here, "
-            "while relevance comes from the remote machine."
-        )
+    if no_sandbox and not execute:
+        print("--no-sandbox needs --execute: a dry run never touches the real client folders.")
+        raise typer.Exit(EXIT_USAGE)
+    if no_sandbox and not site:
+        print("--no-sandbox needs --site NAME: whose client folder is the current site's.")
+        raise typer.Exit(EXIT_USAGE)
+    if no_sandbox and sandbox_dir:
+        print("--no-sandbox and --sandbox contradict each other.")
         raise typer.Exit(EXIT_USAGE)
     params = _params(param or [])
     overrides = _overrides(set_ or [])
@@ -207,9 +251,9 @@ def simulate(
         raise typer.Exit(EXIT_USAGE) from e
 
     pre = None if no_preflight else preflight(path)
-    sandbox = Sandbox(sandbox_dir or tempfile.mkdtemp(prefix="bigfix-actionscript-runner-"))
     target = ssh or "local"
     if pre is not None and pre.errors:
+        sandbox = None
         if as_json:
             print(json.dumps(_payload(action, target, sandbox, pre, None, None), indent=2))
         else:
@@ -222,19 +266,27 @@ def simulate(
         if ssh and become
         else build_evaluator(ssh, timeout, overrides)
     )
-    rel = _relevance(action, evaluate) if relevance else None
-    simulator = Simulator(
-        sandbox,
-        evaluate,
-        cache_dir=Path(platformdirs.user_cache_dir("bigfix-actionscript-runner")) / "prefetch",
-        params=params,
-        execute=execute,
-        assumed_exit_code=exit_code,
-        downloader=None if no_download else AUTO,
-        sandbox_evaluate=build_evaluator(None, timeout, overrides) if ssh else None,
-        baseline=not no_baseline,
-    )
-    report = simulator.run(action.script, first_line=action.first_line)
+    try:
+        host = build_host(ssh, become)
+    except HostError as e:
+        print(f"Can't reach {target}: {e}")
+        raise typer.Exit(EXIT_USAGE) from e
+    try:
+        sandbox = _make_sandbox(host, evaluate, execute, no_sandbox, site, sandbox_dir, target)
+        rel = _relevance(action, evaluate) if relevance else None
+        simulator = Simulator(
+            sandbox,
+            evaluate,
+            cache_dir=Path(platformdirs.user_cache_dir("bigfix-actionscript-runner")) / "prefetch",
+            params=params,
+            execute=execute,
+            assumed_exit_code=exit_code,
+            downloader=None if no_download else AUTO,
+            baseline=not no_baseline,
+        )
+        report = simulator.run(action.script, first_line=action.first_line)
+    finally:
+        host.close()
     if as_json:
         print(json.dumps(_payload(action, target, sandbox, pre, rel, report), indent=2))
     else:
@@ -242,10 +294,36 @@ def simulate(
     raise typer.Exit(EXIT_FAILED if report.status == "failed" else EXIT_OK)
 
 
+def _make_sandbox(
+    host: Host,
+    evaluate: Evaluator,
+    execute: bool,
+    no_sandbox: bool,
+    site: str | None,
+    sandbox_dir: str | None,
+    target: str,
+) -> Sandbox:
+    try:
+        if no_sandbox:
+            # straight to qna: the action context rewrite would point these at a sandbox
+            try:
+                site_folder = evaluate(f'pathname of client folder of site "{site}"')[0]
+                data_folder = evaluate("pathname of data folder of client")[0]
+            except SubstitutionError as e:
+                print(f'No real client folder for site "{site}" on {target}: {e}')
+                raise typer.Exit(EXIT_USAGE) from e
+            return Sandbox(host=host, mode="off", site_folder=site_folder, data_folder=data_folder)
+        root = sandbox_dir or host.temp_dir("bigfix-actionscript-runner-")
+        return Sandbox(root, host=host, mode="client" if execute else "full")
+    except HostError as e:
+        print(f"Can't set up the sandbox on {target}: {e}")
+        raise typer.Exit(EXIT_USAGE) from e
+
+
 def _payload(
     action: LoadedAction,
     target: str,
-    sandbox: Sandbox,
+    sandbox: Sandbox | None,
     pre: PreflightResult | None,
     relevance: list[dict[str, str]] | None,
     report: Report | None,
@@ -254,7 +332,8 @@ def _payload(
         "title": action.title,
         "action": action.action_id,
         "target": target,
-        "sandbox": str(sandbox.root),
+        "sandbox": sandbox.root if sandbox else None,
+        "sandbox_mode": sandbox.mode if sandbox else None,
         "preflight": asdict(pre) if pre is not None else None,
         "relevance": relevance,
         "status": report.status if report else "not run",

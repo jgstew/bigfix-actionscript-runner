@@ -17,11 +17,107 @@ they test), so point them only at test machines.
 
 from __future__ import annotations
 
+import base64
 import functools
 import os
+import re
+import shutil
 import subprocess
+from collections.abc import Callable
 
 import pytest
+
+# --- stand-ins for an SSH connection ------------------------------------------
+
+
+class LocalShellRunner:
+    """An "SSH connection" to this machine: each command runs under `sh -c`.
+
+    Real processes rather than a mock: the POSIX commands SSHHost builds
+    (quoting, sudo-less `sh -c` wrappers, exit codes, binary stdin/stdout) are
+    exactly what needs proving, and only a real shell proves them.
+    """
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+        self.closed = False
+
+    def run(
+        self, command: str, *, input: bytes | None = None, timeout: float | None = None
+    ) -> tuple[bytes, bytes, int]:
+        self.commands.append(command)
+        try:
+            p = subprocess.run(
+                ["sh", "-c", command],
+                input=input,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise TimeoutError(command) from e
+        return p.stdout, p.stderr, p.returncode
+
+    def put_file(self, local, remote: str) -> None:
+        shutil.copyfile(local, remote)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ScriptedRunner:
+    """Records commands and answers from `respond(source, input)`.
+
+    Windows commands arrive as `powershell ... -EncodedCommand <base64>`;
+    `scripts` holds the decoded PowerShell, which is what tests assert on.
+    """
+
+    def __init__(
+        self,
+        respond: Callable[[str, bytes | None], tuple[bytes, bytes, int]] | None = None,
+    ) -> None:
+        self.commands: list[str] = []
+        self.inputs: list[bytes | None] = []
+        self.puts: list[tuple[str, str]] = []
+        self.respond = respond or (lambda source, data: (b"", b"", 0))
+        self.closed = False
+
+    @property
+    def scripts(self) -> list[str]:
+        return [decode_powershell(c) for c in self.commands]
+
+    def run(
+        self, command: str, *, input: bytes | None = None, timeout: float | None = None
+    ) -> tuple[bytes, bytes, int]:
+        self.commands.append(command)
+        self.inputs.append(input)
+        return self.respond(decode_powershell(command), input)
+
+    def put_file(self, local, remote: str) -> None:
+        self.puts.append((str(local), remote))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def decode_powershell(command: str) -> str:
+    """The PowerShell source inside a powershell -EncodedCommand line (else the command)."""
+    m = re.search(r"-EncodedCommand (\S+)", command)
+    if not m:
+        return command
+    return base64.b64decode(m.group(1)).decode("utf-16-le")
+
+
+@pytest.fixture
+def shell_host():
+    """An SSHHost whose "SSH connection" is a local POSIX shell."""
+    if os.name == "nt":
+        pytest.skip("needs a POSIX shell")
+    from bigfix_actionscript_runner.ssh_host import SSHHost
+
+    host = SSHHost("tester@shell", runner=LocalShellRunner(), windows=False)
+    yield host
+    host.close()
 
 
 @functools.lru_cache(maxsize=1)

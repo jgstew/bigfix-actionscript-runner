@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from pathlib import Path
 
 from bigfix_actionscript_runner.executor import Simulator
 from bigfix_actionscript_runner.sandbox import Sandbox
@@ -55,7 +56,7 @@ def test_parameter_is_set_and_substituted(tmp_path):
     )
     assert r.status == "completed"
     assert s.parameters["os"] == "macOS"
-    assert (sb.site / "__createfile").read_text() == "os=macOS\n"
+    assert (Path(sb.site) / "__createfile").read_text() == "os=macOS\n"
 
 
 def test_parameter_cannot_be_redefined(tmp_path):
@@ -107,8 +108,8 @@ def test_createfile_escapes_and_appendfile(tmp_path):
         "createfile until __EOF\nif x; then {{ a; }\n__EOF\nappendfile line1\nappendfile line2\n"
     )
     assert r.status == "completed"
-    assert (sb.site / "__createfile").read_text() == "if x; then { a; }\n"
-    assert (sb.site / "__appendfile").read_text() == "line1\nline2\n"
+    assert (Path(sb.site) / "__createfile").read_text() == "if x; then { a; }\n"
+    assert (Path(sb.site) / "__appendfile").read_text() == "line1\nline2\n"
 
 
 def test_unterminated_createfile_fails(tmp_path):
@@ -122,13 +123,13 @@ def test_copy_into_absolute_path_lands_in_the_sandbox(tmp_path):
     sb, s = sim(tmp_path)
     r = s.run('createfile until E\nx\nE\ncopy __createfile "/tmp/run scan.sh"\n')
     assert r.status == "completed"
-    assert (sb.fs / "tmp" / "run scan.sh").read_text() == "x\n"
+    assert (Path(sb.fs) / "tmp" / "run scan.sh").read_text() == "x\n"
 
 
 def test_copy_fails_if_destination_exists_like_bigfix(tmp_path):
     sb, s = sim(tmp_path)
-    (sb.site / "a").write_text("1")
-    (sb.site / "b").write_text("2")
+    (Path(sb.site) / "a").write_text("1")
+    (Path(sb.site) / "b").write_text("2")
     r = s.run("copy a b\n")
     assert r.status == "failed"
     assert "exists" in r.message
@@ -147,23 +148,23 @@ def test_copy_reads_a_real_file_outside_without_touching_it(tmp_path):
     sb, s = sim(tmp_path)
     r = s.run(f'copy "{real}" got.txt\n')
     assert r.status == "completed"
-    assert (sb.site / "got.txt").read_text() == "real"
+    assert (Path(sb.site) / "got.txt").read_text() == "real"
     assert real.read_text() == "real"
 
 
 def test_move_and_delete(tmp_path):
     sb, s = sim(tmp_path)
-    (sb.site / "a").write_text("1")
+    (Path(sb.site) / "a").write_text("1")
     r = s.run("move a b\ndelete b\ndelete never-existed\n")
     assert r.status == "completed"
-    assert not (sb.site / "a").exists() and not (sb.site / "b").exists()
+    assert not (Path(sb.site) / "a").exists() and not (Path(sb.site) / "b").exists()
 
 
 def test_folder_create_and_delete(tmp_path):
     sb, s = sim(tmp_path)
     r = s.run('folder create "/opt/x y/z"\nfolder delete "/opt/x y"\nfolder delete "/never"\n')
     assert r.status == "completed"
-    assert not (sb.fs / "opt" / "x y").exists()
+    assert not (Path(sb.fs) / "opt" / "x y").exists()
 
 
 def test_delete_of_absolute_path_only_touches_the_sandbox(tmp_path):
@@ -182,7 +183,7 @@ def test_if_elseif_else(tmp_path):
     sb, s = sim(tmp_path, {"a": "False", "b": "True"})
     r = s.run("if {a}\nappendfile A\nelseif {b}\nappendfile B\nelse\nappendfile C\nendif\n")
     assert r.status == "completed"
-    assert (sb.site / "__appendfile").read_text() == "B\n"
+    assert (Path(sb.site) / "__appendfile").read_text() == "B\n"
     assert "skipped" in [o for _, o in outcomes(r)]
 
 
@@ -267,7 +268,7 @@ def test_execute_runs_waits_with_real_exit_code_and_remaps_paths(tmp_path):
     argv, cwd, wait, timeout = ran[0]
     assert argv == [
         "/bin/bash",
-        str(sb.fs / "tmp" / "x.sh"),
+        str(Path(sb.fs) / "tmp" / "x.sh"),
         "/etc/hosts",
     ]  # /etc/hosts isn't in the sandbox
     assert (cwd, wait, timeout) == (sb.site, True, 30)
@@ -282,28 +283,7 @@ def test_override_key_lines_have_their_own_line_numbers(tmp_path):
     assert outcomes(r) == [(10, "ok"), (11, "ok"), (12, "ok"), (13, "ok"), (14, "shown")]
 
 
-def test_sandbox_expressions_go_to_the_sandbox_evaluator(tmp_path):
-    """With a remote (SSH) evaluator, anything that looks at the sandbox is
-    evaluated locally instead: the remote machine can't see it."""
-    remote, local = [], []
-    sb = Sandbox(tmp_path / "sb")
-    s = Simulator(
-        sb,
-        fake_evaluator({"pathname of system folder": "C:\\Windows\\System32"}, remote),
-        sandbox_evaluate=fake_evaluator({f'pathname of folder "{sb.data}"': str(sb.data)}, local),
-        cache_dir=tmp_path / "cache",
-    )
-    r = s.run(
-        'parameter "d" = "{pathname of data folder of client}"\n'
-        'parameter "s" = "{pathname of system folder}"\n'
-    )
-    assert r.status == "completed", r.message
-    assert local == [f'pathname of folder "{sb.data}"']
-    assert remote == ["pathname of system folder"]
-    assert s.parameters == {"d": str(sb.data), "s": "C:\\Windows\\System32"}
-
-
-def test_without_a_sandbox_evaluator_everything_goes_to_the_one_evaluator(tmp_path):
+def test_sandbox_relevance_goes_to_the_one_evaluator(tmp_path):
     calls = []
     sb, s = sim(tmp_path, {}, calls=calls)
     s.run('parameter "d" = "{pathname of data folder of client}"\n')
@@ -373,7 +353,7 @@ def test_prefetch_block_with_conditions_runs_before_line_one(tmp_path):
     )
     assert r.status == "completed", r.message
     assert calls == ["https://x/arm.tgz"]
-    assert (sb.site / "got.tgz").read_bytes() == DATA
+    assert (Path(sb.site) / "got.tgz").read_bytes() == DATA
     assert r.prefetched == ["arm.tgz"]
 
 
@@ -382,7 +362,7 @@ def test_prefetch_statement_outside_block(tmp_path):
     sb, s = sim(tmp_path, downloader=downloader(calls))
     r = s.run(f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n")
     assert r.status == "completed"
-    assert (sb.site / "__Download" / "a.zip").read_bytes() == DATA
+    assert (Path(sb.site) / "__Download" / "a.zip").read_bytes() == DATA
 
 
 def test_bad_prefetch_hash_fails_before_any_line_runs(tmp_path):
@@ -398,7 +378,7 @@ def test_download_now_happens_at_its_line(tmp_path):
     sb, s = sim(tmp_path, downloader=downloader(calls))
     r = s.run("delete x\ndownload now as n.bin https://x/n.bin\n")
     assert r.status == "completed"
-    assert (sb.site / "__Download" / "n.bin").exists()
+    assert (Path(sb.site) / "__Download" / "n.bin").exists()
     assert [st.outcome for st in r.steps] == ["ok", "ok"]
 
 
@@ -407,7 +387,7 @@ def test_download_now_happens_at_its_line(tmp_path):
 
 def stateful(sb):
     """Answers that depend on the sandbox, like real relevance does."""
-    marker = sb.site / "made.txt"
+    marker = Path(sb.site) / "made.txt"
 
     def exists_marker():
         return "True" if marker.exists() else "False"
@@ -465,7 +445,7 @@ def test_step_values_are_evaluated_again_and_compared_with_the_baseline(tmp_path
 def test_an_error_in_the_baseline_can_become_a_value(tmp_path):
     """Like the name of a prefetched file: no such file before the action, a name after."""
     sb = Sandbox(tmp_path / "sb")
-    made = sb.site / "made.txt"
+    made = Path(sb.site) / "made.txt"
 
     def name_of_made():
         if not made.exists():
@@ -528,3 +508,156 @@ def test_parameters_given_up_front_are_not_deferred(tmp_path):
     )
     entry = r.baseline[0]
     assert (entry.deferred, entry.value) == (False, "given")
+
+
+# --- sandbox modes: what a real (--execute) run changes ----------------------------
+
+
+def test_a_dry_run_refuses_a_sandbox_that_lets_real_paths_through(tmp_path):
+    sb = Sandbox(tmp_path / "sb", mode="client")
+    try:
+        Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c")
+    except ValueError as e:
+        assert "--execute" in str(e)
+    else:
+        raise AssertionError("a dry run must keep every path in the sandbox")
+
+
+def test_client_mode_changes_real_files_outside_the_client_folders(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "old.txt").write_text("old")
+    sb = Sandbox(tmp_path / "sb", mode="client")
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", execute=True)
+    r = s.run(
+        "createfile until E\nnew\nE\n"
+        f'copy __createfile "{real}/new.txt"\n'
+        f'delete "{real}/old.txt"\n'
+        f'folder create "{real}/made/deeper"\n'
+    )
+    assert r.status == "completed", r.message
+    assert (real / "new.txt").read_text() == "new\n"
+    assert not (real / "old.txt").exists()
+    assert (real / "made" / "deeper").is_dir()
+    assert Path(sb.site, "__createfile").exists()  # the client folder stays in the sandbox
+
+
+def test_client_mode_move_moves_the_real_file(tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    sb = Sandbox(tmp_path / "sb", mode="client")
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", execute=True)
+    r = s.run(f'move "{tmp_path}/a.txt" "{tmp_path}/b.txt"\n')
+    assert r.status == "completed", r.message
+    assert not (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").read_text() == "a"
+
+
+def test_client_mode_relevance_still_sees_the_sandboxed_client_folders(tmp_path):
+    calls = []
+    sb = Sandbox(tmp_path / "sb", mode="client")
+    s = Simulator(sb, fake_evaluator({}, calls), cache_dir=tmp_path / "c", execute=True)
+    s.run('parameter "d" = "{pathname of data folder of client}"\n')
+    assert calls == [f'pathname of folder "{sb.data}"']
+
+
+def test_off_mode_uses_the_real_client_folders(tmp_path):
+    site = tmp_path / "BES" / "__BESData" / "MySite"
+    site.mkdir(parents=True)
+    calls = []
+    sb = Sandbox(mode="off", site_folder=str(site), data_folder=str(site.parent))
+    answers = {f'pathname of folder "{site}"': str(site)}
+    s = Simulator(sb, fake_evaluator(answers, calls), cache_dir=tmp_path / "c", execute=True)
+    r = s.run(
+        'createfile until E\nx\nE\nparameter "f" = "{pathname of client folder of current site}"\n'
+    )
+    assert r.status == "completed", r.message
+    assert (site / "__createfile").read_text() == "x\n"
+    assert calls == [f'pathname of folder "{site}"']
+
+
+def test_folder_delete_never_removes_the_client_folders(tmp_path):
+    site = tmp_path / "MySite"
+    site.mkdir()
+    sb = Sandbox(mode="off", site_folder=str(site), data_folder=str(tmp_path))
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", execute=True)
+    s.run(f'folder delete "{site}"\nfolder delete "{tmp_path}"\n')
+    assert site.is_dir()
+
+
+# --- the host: everything happens on the target ------------------------------------
+
+
+def test_everything_happens_on_the_host(tmp_path, shell_host):
+    """With an SSH host, file commands and executed commands run on the target."""
+    real = tmp_path / "target-real"
+    sb = Sandbox(str(tmp_path / "remote-sb"), host=shell_host, mode="client")
+    s = Simulator(sb, fake_evaluator({"4 = 4": "True"}), cache_dir=tmp_path / "c", execute=True)
+    r = s.run(
+        "createfile until E\n#!/bin/sh\npwd > ran-in.txt\nexit 4\nE\n"
+        f'folder create "{real}"\n'
+        f'copy __createfile "{real}/job.sh"\n'
+        f'wait /bin/sh "{real}/job.sh"\n'
+        "continue if {exit code of action = 4}\n"
+    )
+    assert r.status == "completed", r.message
+    assert (real / "job.sh").exists()
+    assert (
+        Path(Path(sb.site, "ran-in.txt").read_text().strip()).resolve() == Path(sb.site).resolve()
+    )
+    assert s.exit_code == 4
+    assert any("job.sh" in c for c in shell_host._runner.commands)
+
+
+def test_prefetches_are_put_on_the_host_and_hashed_there(tmp_path):
+    from bigfix_actionscript_runner.host import LocalHost
+
+    class OtherHashHost(LocalHost):
+        def sha256(self, path):
+            return "0" * 64
+
+    sb = Sandbox(tmp_path / "sb", host=OtherHashHost())
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", downloader=downloader([]))
+    r = s.run(f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n")
+    assert r.status == "failed"
+    assert "on the target" in r.message
+
+
+def test_host_errors_fail_the_line(tmp_path):
+    from bigfix_actionscript_runner.host import HostError, LocalHost
+
+    class ReadOnlyHost(LocalHost):
+        def write_bytes(self, path, data, *, append=False):
+            raise HostError("Read-only file system")
+
+    sb = Sandbox(tmp_path / "sb", host=ReadOnlyHost())
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c")
+    r = s.run("createfile until E\nx\nE\n")
+    assert r.status == "failed" and "Read-only" in r.message
+
+
+def test_windows_commands_are_split_like_a_windows_command_line(tmp_path):
+    from pathlib import PureWindowsPath
+
+    class WindowsShapedHost:
+        windows, pure, name = True, PureWindowsPath, "win"
+
+        def __init__(self) -> None:
+            self.ran = []
+
+        def mkdir(self, path):
+            pass
+
+        def exists(self, path):
+            return False
+
+        def run(self, argv, *, cwd, wait, timeout=None):
+            self.ran.append((argv, cwd))
+            return 0
+
+    host = WindowsShapedHost()
+    sb = Sandbox("C:\\T\\sb", host=host, mode="client")
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", execute=True)
+    r = s.run('wait "C:\\Program Files\\App\\app.exe" /S "/D=C:\\x y"\n')
+    assert r.status == "completed", r.message
+    assert host.ran == [
+        (["C:\\Program Files\\App\\app.exe", "/S", "/D=C:\\x y"], "C:\\T\\sb\\site")
+    ]

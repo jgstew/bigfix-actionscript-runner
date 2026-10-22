@@ -38,18 +38,30 @@ def test_real_relevance_and_sandboxed_client_folders(tmp_path):
 
 @pytest.mark.live_qna
 @pytest.mark.skipif(os.name == "nt", reason="uses /bin/sh")
-def test_execute_uses_the_real_exit_code(tmp_path):
+def test_execute_changes_real_files_and_uses_the_real_exit_code(tmp_path):
+    """--execute: the script lands at the real path, runs, and its exit code is real."""
+    job = tmp_path / "real" / "exit7.sh"
     script = (
         "createfile until END\nexit 7\nEND\n"
-        'copy __createfile "/tmp/bas_exit7.sh"\n'
-        'wait /bin/sh "/tmp/bas_exit7.sh"\n'
+        f'folder create "{job.parent}"\n'
+        f'copy __createfile "{job}"\n'
+        f'wait /bin/sh "{job}"\n'
         "continue if {exit code of action = 7}\n"
         "continue if {exit code of action = 0}\n"
     )
     _, data = run(tmp_path, script, "--execute")
     assert data["status"] == "failed"
-    assert data["failed_line"] == 7
-    assert not os.path.exists("/tmp/bas_exit7.sh")  # only the sandbox copy was made
+    assert data["failed_line"] == 8
+    assert data["sandbox_mode"] == "client"
+    assert job.read_text() == "exit 7\n"  # the real file, not a sandbox copy
+
+
+@pytest.mark.live_qna
+def test_dry_run_leaves_real_paths_alone(tmp_path):
+    target = tmp_path / "untouched.txt"
+    r, _ = run(tmp_path, f'createfile until E\nx\nE\ncopy __createfile "{target}"\n')
+    assert r.exit_code == 0, r.output
+    assert not target.exists()
 
 
 @pytest.mark.live_qna

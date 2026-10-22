@@ -1,19 +1,20 @@
-"""Run ActionScript line by line against a sandbox.
+"""Run ActionScript line by line on a host, through a sandbox.
 
 Relevance substitution is real (through the evaluator); file commands act on
-the sandbox; run/wait-style commands are shown, or run with `execute=True`.
-Prefetch statements are handled in a pre-pass before line 1, like a client.
+the host, at the paths the sandbox maps them to; run/wait-style commands are
+shown, or run on the host with `execute=True`. Prefetch statements are handled
+in a pre-pass before line 1, like a client.
 """
 
-import os
+import hashlib
 import re
 import shlex
-import shutil
-import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .host import HostError
 from .prefetch import AUTO, Downloader, PrefetchError, PrefetchItem, fetch, parse_prefetch
 from .rewrite import ActionContext, rewrite
 from .sandbox import Sandbox
@@ -69,16 +70,6 @@ class Report:
     steps: list[Step] = field(default_factory=list)
     prefetched: list[str] = field(default_factory=list)
     baseline: list[BaselineEntry] = field(default_factory=list)
-
-
-def default_runner(argv: list[str] | str, *, cwd: Path, wait: bool, timeout: float | None) -> int:
-    if not wait:
-        subprocess.Popen(argv, cwd=cwd, start_new_session=True)
-        return 0
-    try:
-        return subprocess.run(argv, cwd=cwd, timeout=timeout, check=False).returncode
-    except subprocess.TimeoutExpired as e:
-        raise LineError(f"timed out after {timeout} seconds") from e
 
 
 def split_args(text: str) -> list[str]:
@@ -137,12 +128,16 @@ class Simulator:
         execute: bool = False,
         assumed_exit_code: int = 0,
         action_id: int = 1,
-        runner: Runner = default_runner,
+        runner: Runner | None = None,
         downloader: Downloader | None = AUTO,
-        sandbox_evaluate: Evaluator | None = None,
         baseline: bool = False,
     ) -> None:
+        if not execute and sandbox.mode != "full":
+            raise ValueError(
+                f"a {sandbox.mode!r} sandbox lets real paths through: that needs --execute"
+            )
         self.sandbox = sandbox
+        self.host = sandbox.host
         self._evaluate = evaluate
         self.cache_dir = cache_dir
         self.given_params = dict(params or {})
@@ -151,9 +146,8 @@ class Simulator:
         self.exit_code = assumed_exit_code
         self.assumed_exit_code = assumed_exit_code
         self.action_id = action_id
-        self.runner = runner
+        self.runner: Runner = runner if runner is not None else self.host.run
         self.downloader = downloader
-        self._sandbox_evaluate = sandbox_evaluate
         self._override: dict[str, str] | None = None
         self.baseline = baseline
         self._baseline: dict[str, BaselineEntry] = {}
@@ -166,17 +160,12 @@ class Simulator:
             parameters=self.parameters,
             action_id=self.action_id,
             exit_code=self.exit_code,
-            site_folder=str(self.sandbox.site),
-            data_folder=str(self.sandbox.data),
+            site_folder=self.sandbox.site,
+            data_folder=self.sandbox.data,
         )
 
     def _eval(self, expr: str) -> list[str]:
-        text = rewrite(expr, self._context())
-        # a remote (SSH) evaluator can't see the local sandbox: anything that
-        # refers to it is evaluated by the sandbox (local) evaluator instead
-        if self._sandbox_evaluate is not None and str(self.sandbox.root) in text:
-            return self._sandbox_evaluate(text)
-        return self._evaluate(text)
+        return self._evaluate(rewrite(expr, self._context()))
 
     def _eval_recorded(self, expr: str) -> list[str]:
         """Evaluate at this step (state may have changed) and record it for the step."""
@@ -235,7 +224,10 @@ class Simulator:
                 continue
             active = not stack or stack[-1].active
             try:
-                i = self._line(text, lineno, lines, i, stack, active)
+                try:
+                    i = self._line(text, lineno, lines, i, stack, active)
+                except HostError as e:
+                    raise LineError(str(e)) from e
             except LineError as e:
                 self._step(lineno, text, "failed", detail=str(e))
                 report.status, report.failed_line, report.message = "failed", lineno, str(e)
@@ -363,16 +355,29 @@ class Simulator:
         item = parse_prefetch(substituted)
         if item is None:
             raise LineError(f"can't parse prefetch/download statement: {substituted}")
-        try:
-            path = fetch(item, self.sandbox.site / "__Download", self.cache_dir, self.downloader)
-        except (PrefetchError, OSError) as e:
-            raise LineError(str(e)) from e
-        except Exception as e:  # requests errors etc.
-            raise LineError(f"download failed: {e}") from e
+        download = self.sandbox.resolve("__Download")
+        dest = str(self.host.pure(download, item.name))
+        # downloaded and verified here, then put on the host (like a relay
+        # handing a client its prefetch), and checked again where it landed
+        with tempfile.TemporaryDirectory(prefix="bfasr-prefetch-") as staging:
+            try:
+                local = fetch(item, Path(staging), self.cache_dir, self.downloader)
+            except (PrefetchError, OSError) as e:
+                raise LineError(str(e)) from e
+            except Exception as e:  # requests errors etc.
+                raise LineError(f"download failed: {e}") from e
+            try:
+                self.host.mkdir(download)
+                self.host.put_file(local, dest)
+                landed = self.host.sha256(dest)
+            except HostError as e:
+                raise LineError(f"can't put {item.name} on the target: {e}") from e
+            if landed != hashlib.sha256(local.read_bytes()).hexdigest():
+                raise LineError(f"{item.name}: SHA-256 on the target differs from the download")
         self._report.prefetched.append(item.name)
         detail = "placeholder" if self.downloader is None else _verified(item)
         outcome = "ok" if item.now else "prefetched"
-        self._step(lineno, text, outcome, substituted, f"{self.sandbox.display(path)} ({detail})")
+        self._step(lineno, text, outcome, substituted, f"{self.sandbox.display(dest)} ({detail})")
 
     # -- one line ---------------------------------------------------------------
 
@@ -416,7 +421,7 @@ class Simulator:
                 self._step(lineno, text, "skipped")
                 return i
             content = "\n".join(self._sub(b) for b in body) + "\n"
-            (self.sandbox.site / "__createfile").write_text(content)
+            self.host.write_bytes(self.sandbox.resolve("__createfile"), content.encode())
             self._step(lineno, text, "ok", detail=f"{len(body)} line(s) -> __createfile")
             return i
 
@@ -456,8 +461,9 @@ class Simulator:
 
         if low.startswith("appendfile"):
             sub = self._sub(text[len("appendfile") :].lstrip(" \t"))
-            with open(self.sandbox.site / "__appendfile", "a") as f:
-                f.write(sub + "\n")
+            self.host.write_bytes(
+                self.sandbox.resolve("__appendfile"), (sub + "\n").encode(), append=True
+            )
             self._step(lineno, text, "ok", sub)
             return i
 
@@ -467,15 +473,18 @@ class Simulator:
             if len(args) != 2:
                 raise LineError(f"{low[:4]} needs a source and a destination")
             src, dst = self.sandbox.resolve_read(args[0]), self.sandbox.resolve(args[1])
-            if not src.is_file():
+            if not self.host.is_file(src):
                 raise LineError(f"source does not exist: {args[0]}")
-            if dst.exists():
+            if self.host.exists(dst):
                 raise LineError(f"destination exists: {args[1]}")
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if low.startswith("move ") and self.sandbox.contains(src):
-                shutil.move(src, dst)
+            self.host.mkdir(self.sandbox.parent(dst))
+            # a dry run never moves a real file away: it copies it into the sandbox
+            if low.startswith("move ") and (
+                self.sandbox.mode != "full" or self.sandbox.contains(src)
+            ):
+                self.host.move(src, dst)
             else:
-                shutil.copyfile(src, dst)
+                self.host.copy_file(src, dst)
             self._step(
                 lineno,
                 text,
@@ -490,13 +499,9 @@ class Simulator:
             args = split_args(sub[len("folder create ") :])
             target = self.sandbox.resolve(args[0] if args else "")
             if low.startswith("folder create "):
-                target.mkdir(parents=True, exist_ok=True)
-            elif target.is_dir() and target not in (
-                self.sandbox.root,
-                self.sandbox.site,
-                self.sandbox.fs,
-            ):
-                shutil.rmtree(target)
+                self.host.mkdir(target)
+            elif target not in self.sandbox.protected and self.host.is_dir(target):
+                self.host.delete_tree(target)
             self._step(lineno, text, "ok", sub, self.sandbox.display(target))
             return i
 
@@ -504,8 +509,8 @@ class Simulator:
             sub = self._sub(text)
             args = split_args(sub[7:])
             target = self.sandbox.resolve(args[0] if args else "")
-            if target.is_file():
-                target.unlink()
+            if self.host.is_file(target):
+                self.host.delete_file(target)
             self._step(lineno, text, "ok", sub, self.sandbox.display(target))
             return i
 
@@ -577,12 +582,9 @@ class Simulator:
             )
             return
         argv = self._argv(command)
-        try:
-            code = self.runner(
-                argv, cwd=self.sandbox.site, wait=wait, timeout=int(timeout) if timeout else None
-            )
-        except FileNotFoundError as e:
-            raise LineError(f"can't run: {e}") from e
+        code = self.runner(
+            argv, cwd=self.sandbox.site, wait=wait, timeout=int(timeout) if timeout else None
+        )
         if wait:
             self.exit_code = code
         self._step(
@@ -590,23 +592,34 @@ class Simulator:
         )
 
     def _argv(self, command: str) -> list[str]:
-        """Split a command line, swapping absolute paths that exist in the sandbox."""
-        argv = shlex.split(command, posix=os.name != "nt")
+        """Split a command line, swapping absolute paths that exist in the sandbox.
+
+        Only a dry run's sandbox remaps other absolute paths; with --execute
+        they resolve to themselves and stay as written.
+        """
+        if self.host.windows:
+            # a Windows command line: "quoted" arguments, backslashes are literal
+            argv = [
+                a[1:-1] if len(a) > 1 and a[0] == a[-1] == '"' else a for a in split_win(command)
+            ]
+        else:
+            argv = shlex.split(command)
         out = []
         for arg in argv:
-            mapped = self.sandbox.resolve(arg)
-            is_abs = os.path.isabs(arg) or re.match(r"^[A-Za-z]:[\\/]", arg)
-            out.append(
-                str(mapped)
-                if is_abs and mapped.exists() and not self.sandbox.contains(Path(arg))
-                else arg
-            )
+            is_abs = arg.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", arg)
+            mapped = self.sandbox.resolve(arg) if is_abs else arg
+            out.append(mapped if mapped != arg and self.host.exists(mapped) else arg)
         return out
 
 
 class _Exit(Exception):
     def __init__(self, code: int) -> None:
         self.code = code
+
+
+def split_win(command: str) -> list[str]:
+    """Split a Windows command line on whitespace outside double quotes."""
+    return re.findall(r'(?:"[^"]*"|[^\s"])+', command)
 
 
 def _verified(item: PrefetchItem) -> str:
