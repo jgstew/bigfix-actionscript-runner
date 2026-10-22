@@ -395,3 +395,75 @@ def test_no_sandbox_fails_cleanly_without_a_client(tmp_path, fake):
     )
     assert r.exit_code == 2
     assert "client folder" in r.output
+
+
+# --- more of the command line --------------------------------------------------------
+
+
+def test_build_host_is_local_without_ssh():
+    assert isinstance(cli.build_host(None), LocalHost)
+
+
+def test_relevance_errors_are_reported_not_fatal(tmp_path, fake):
+    bad = TASK.replace("mac of operating system", "bogus inspector")
+    r = runner.invoke(
+        cli.app,
+        [str(write(tmp_path, "t.bes", bad)), "--relevance", "--sandbox", str(tmp_path / "sb")],
+    )
+    assert r.exit_code == 0, r.output
+    assert "ERROR: " in r.output and "bogus inspector" in r.output
+    assert "Not relevant on local" in r.output
+
+
+def test_exit_is_reported_with_its_code(tmp_path, fake):
+    r = runner.invoke(
+        cli.app, [str(write(tmp_path, "a.bas", "exit 3\n")), "--sandbox", str(tmp_path / "sb")]
+    )
+    assert r.exit_code == 0
+    assert "Exited with code 3" in r.output
+
+
+def test_preflight_errors_in_json(tmp_path, fake):
+    script = write(tmp_path, "a.bas", "copy {pathname of (x} b\n")
+    r = runner.invoke(cli.app, [str(script), "--json"])
+    assert r.exit_code == 3
+    data = json.loads(r.output)
+    assert data["status"] == "not run" and data["sandbox"] is None
+    assert data["preflight"]["errors"]
+
+
+def test_an_unreachable_target_exits_2(tmp_path, fake, monkeypatch):
+    from bigfix_actionscript_runner.host import HostError
+
+    def build_host(ssh, become=False):
+        raise HostError("could not connect to nowhere: Connection refused")
+
+    monkeypatch.setattr(cli, "build_host", build_host)
+    r = runner.invoke(cli.app, [str(write(tmp_path)), "--ssh", "u@nowhere"])
+    assert r.exit_code == 2
+    assert "Can't reach u@nowhere: could not connect" in r.output
+
+
+def test_a_sandbox_that_cant_be_made_exits_2(tmp_path, fake, monkeypatch):
+    from bigfix_actionscript_runner.host import HostError
+
+    class NoTemp(LocalHost):
+        def temp_dir(self, prefix):
+            raise HostError("No space left on device")
+
+    monkeypatch.setattr(cli, "build_host", lambda ssh, become=False: NoTemp())
+    r = runner.invoke(cli.app, [str(write(tmp_path))])
+    assert r.exit_code == 2
+    assert "Can't set up the sandbox on local: No space left" in r.output
+
+
+def test_the_host_is_closed_after_the_run(tmp_path, fake, monkeypatch):
+    closed = []
+
+    class Tracked(LocalHost):
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cli, "build_host", lambda ssh, become=False: Tracked())
+    runner.invoke(cli.app, [str(write(tmp_path)), "--sandbox", str(tmp_path / "sb")])
+    assert closed == [True]

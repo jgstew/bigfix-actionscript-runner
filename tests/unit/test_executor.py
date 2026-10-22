@@ -4,6 +4,8 @@ import hashlib
 import re
 from pathlib import Path
 
+import pytest
+
 from bigfix_actionscript_runner.executor import Simulator
 from bigfix_actionscript_runner.sandbox import Sandbox
 from bigfix_actionscript_runner.substitution import SubstitutionError
@@ -661,3 +663,151 @@ def test_windows_commands_are_split_like_a_windows_command_line(tmp_path):
     assert host.ran == [
         (["C:\\Program Files\\App\\app.exe", "/S", "/D=C:\\x y"], "C:\\T\\sb\\site")
     ]
+
+
+# --- more ActionScript semantics ----------------------------------------------------
+
+ARCH = {
+    'architecture of operating system = "arm64"': "False",
+    'architecture of operating system = "x86_64"': "True",
+}
+
+
+def test_prefetch_block_elseif_and_else_pick_one_item(tmp_path):
+    calls = []
+    _, s = sim(tmp_path, ARCH, downloader=downloader(calls))
+    r = s.run(
+        "begin prefetch block\n"
+        '  if {architecture of operating system = "arm64"}\n'
+        f"    add prefetch item name=a.tgz sha1={SHA1} size=7 url=https://x/a sha256={SHA256}\n"
+        '  elseif {architecture of operating system = "x86_64"}\n'
+        f"    add prefetch item name=b.tgz sha1={SHA1} size=7 url=https://x/b sha256={SHA256}\n"
+        "  else\n"
+        f"    add prefetch item name=c.tgz sha1={SHA1} size=7 url=https://x/c sha256={SHA256}\n"
+        "  endif\n"
+        "end prefetch block\n"
+    )
+    assert r.status == "completed", r.message
+    assert calls == ["https://x/b"]
+    assert r.prefetched == ["b.tgz"]
+
+
+def test_other_lines_in_a_prefetch_block_are_warnings(tmp_path):
+    _, s = sim(tmp_path)
+    r = s.run("begin prefetch block\ncollect prefetch items\nend prefetch block\n")
+    assert r.status == "completed"
+    assert [(st.line, st.outcome) for st in r.steps] == [(2, "warning")]
+
+
+def test_a_failure_in_a_prefetch_block_names_its_line(tmp_path):
+    _, s = sim(tmp_path, downloader=downloader([]))
+    r = s.run(
+        "begin prefetch block\n"
+        f"add prefetch item name=a sha1={'0' * 40} size=7 url=https://x/a\n"
+        "end prefetch block\n",
+        first_line=20,
+    )
+    assert (r.status, r.failed_line) == ("failed", 21)
+
+
+def test_download_failures_fail_the_action(tmp_path):
+    def broken(url, dest):
+        raise ConnectionError("no route to host")
+
+    _, s = sim(tmp_path, downloader=broken)
+    r = s.run("download now https://x/a.zip\n")
+    assert r.status == "failed"
+    assert "download failed: no route to host" in r.message
+
+
+def test_a_prefetch_that_cant_be_put_on_the_target_fails(tmp_path):
+    from bigfix_actionscript_runner.host import HostError, LocalHost
+
+    class FullDisk(LocalHost):
+        def put_file(self, local, dst):
+            raise HostError("No space left on device")
+
+    sb = Sandbox(tmp_path / "sb", host=FullDisk())
+    s = Simulator(sb, fake_evaluator(), cache_dir=tmp_path / "c", downloader=downloader([]))
+    r = s.run(f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n")
+    assert r.status == "failed"
+    assert "can't put a.zip on the target: No space left" in r.message
+
+
+def test_createfile_in_a_false_branch_is_skipped_and_not_substituted(tmp_path):
+    calls = []
+    sb, s = sim(tmp_path, {"1 = 2": "False"}, calls=calls)
+    r = s.run("if {1 = 2}\ncreatefile until E\n{never evaluated}\nE\nendif\n")
+    assert r.status == "completed", r.message
+    assert "never evaluated" not in calls
+    assert not Path(sb.site, "__createfile").exists()
+    assert outcomes(r) == [(1, "ok"), (2, "skipped"), (5, "ok")]
+
+
+@pytest.mark.parametrize("line", ["else", "endif", "elseif {true}"])
+def test_else_and_endif_without_if_fail(tmp_path, line):
+    _, s = sim(tmp_path)
+    r = s.run(line + "\n")
+    assert r.status == "failed"
+    assert "without if" in r.message
+
+
+def test_copy_needs_two_arguments(tmp_path):
+    _, s = sim(tmp_path)
+    r = s.run("copy onlyone\n")
+    assert r.status == "failed" and "source and a destination" in r.message
+
+
+def test_unparsable_parameter_line_fails(tmp_path):
+    _, s = sim(tmp_path)
+    r = s.run("parameter x = y\n")
+    assert r.status == "failed" and "can't parse parameter" in r.message
+
+
+def test_unknown_commands_warn_and_the_action_continues(tmp_path):
+    _, s = sim(tmp_path)
+    r = s.run("frobnicate now\ndelete a\n")
+    assert r.status == "completed"
+    assert outcomes(r) == [(1, "warning"), (2, "ok")]
+    assert r.steps[0].detail == "command not simulated"
+
+
+def test_pause_while_false_is_ok(tmp_path):
+    _, s = sim(tmp_path, {"x": "False"})
+    r = s.run("pause while {x}\n")
+    assert outcomes(r) == [(1, "ok")]
+
+
+def test_a_dry_run_moves_files_within_the_sandbox(tmp_path):
+    sb, s = sim(tmp_path)
+    Path(sb.site, "a").write_text("1")
+    r = s.run("move a b\n")
+    assert r.status == "completed"
+    assert not Path(sb.site, "a").exists() and Path(sb.site, "b").read_text() == "1"
+
+
+def test_a_dry_run_copies_rather_than_moves_a_real_file(tmp_path):
+    real = tmp_path / "real.txt"
+    real.write_text("r")
+    sb, s = sim(tmp_path)
+    r = s.run(f'move "{real}" b\n')
+    assert r.status == "completed", r.message
+    assert real.read_text() == "r"  # untouched
+    assert Path(sb.site, "b").read_text() == "r"
+
+
+def test_baseline_evaluates_each_distinct_expression_once_and_skips_comments(tmp_path):
+    calls = []
+    _, s = sim(tmp_path, {"a": "1"}, calls=calls, baseline=True)
+    s.run("// {not this}\ncreatefile until E\n{a} {a}\nE\n")
+    assert calls.count("a") == 3  # once for the baseline, twice at the step
+    assert "not this" not in calls
+
+
+def test_a_dry_run_assumes_the_exit_code_for_wait_but_not_for_run(tmp_path):
+    _, s = sim(tmp_path, assumed_exit_code=4)
+    s.exit_code = 9
+    s.run("run /bin/true\n")
+    assert s.exit_code == 9
+    s.run("wait /bin/true\n")
+    assert s.exit_code == 4

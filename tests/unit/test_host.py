@@ -136,3 +136,22 @@ def test_run_timeout_raises(host, tmp_path):
 def test_missing_program_raises(host, tmp_path):
     with pytest.raises(HostError):
         host.run(["/no/such/program-bfasr"], cwd=str(tmp_path), wait=True)
+
+
+# --- LocalHost failures surface as HostError ----------------------------------------
+
+
+def test_local_failures_are_host_errors(tmp_path):
+    host = LocalHost()
+    f = tmp_path / "file"
+    f.write_text("x")
+    for op in (
+        lambda: host.mkdir(str(f / "sub")),
+        lambda: host.write_bytes(str(tmp_path / "no" / "dir" / "x"), b""),
+        lambda: host.copy_file(str(tmp_path / "missing"), str(tmp_path / "y")),
+        lambda: host.move(str(tmp_path / "missing"), str(tmp_path / "y")),
+        lambda: host.sha256(str(tmp_path / "missing")),
+        lambda: host.delete_file(str(tmp_path)),  # a folder, not a file
+    ):
+        with pytest.raises(HostError):
+            op()

@@ -17,7 +17,9 @@ locally or on an SSH target. Entry point: `bigfix_actionscript_runner.cli:main`.
   - `substitution.py` -- `{expression}` scanning and substitution
   - `rewrite.py` -- action context qna lacks (`parameter "x"`, client folders)
   - `evaluate.py` -- client relevance through bigfix-remote-client-relevance
-  - `sandbox.py` -- where paths go (client folders, and in a dry run, everything)
+  - `host.py` -- the Host protocol and LocalHost: every file operation and command
+  - `ssh_host.py` -- SSHHost: the same over SSH (sh -c / sudo -n, or PowerShell)
+  - `sandbox.py` -- where paths go: modes full (dry run), client (--execute), off
   - `prefetch.py` -- prefetch parsing and downloads (bigfix-prefetch)
   - `executor.py` -- the ActionScript interpreter
   - `cli.py` -- the one stdout writer
@@ -48,10 +50,14 @@ files on the target, so only point them at test machines.
   library logs; ruff's `T20` enforces it.
 - Match the surrounding code: comments explain *why*, names are
   descriptive, and test fakes implement only the slice of a third-party API
-  the code touches (`FakeHost` in `tests/unit/fakes.py` stands in for a
-  target machine).
+  the code touches (`LocalShellRunner` and `ScriptedRunner` in
+  `tests/conftest.py` stand in for an SSH connection).
 - **Nothing outside the sandbox changes without `--execute`.** A dry run
   must never write to the real filesystem of the local machine or of an SSH
-  target, outside the sandbox folder.
+  target, outside the sandbox folder; `Simulator` refuses a non-`full`
+  sandbox without `execute=True`.
+- **Every file operation and command goes through the Host**, never
+  `pathlib`/`shutil`/`subprocess` in the executor: the target may be another
+  machine and another OS. Paths are strings in the host's flavor.
 - **Check user-visible changes with a real run** when qna is available,
   e.g. `uv run bigfix-actionscript-runner path/to/task.bes`.

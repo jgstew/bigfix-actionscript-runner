@@ -54,7 +54,7 @@ def invoke(tmp_path, env, script, *args):
 
 
 def test_host_contract_on_the_target(target, tmp_path):
-    env, host, scratch = target
+    _, host, scratch = target
     f = j(host, scratch, "it's a file.bin")
     host.write_bytes(f, bytes(range(256)))
     host.write_bytes(f, b"!", append=True)

@@ -143,3 +143,44 @@ def test_unhashed_downloads_use_a_tls_verified_download(tmp_path, monkeypatch):
     )
     fetch(PrefetchItem("a.tgz", URL), tmp_path / "dl", tmp_path / "cache", AUTO)
     assert used == [URL]
+
+
+def test_size_only_items_are_checked(tmp_path):
+    item = PrefetchItem("a.bin", URL, size=len(DATA) + 1)
+    with pytest.raises(PrefetchError, match="a.bin"):
+        fetch(item, tmp_path / "dl", tmp_path / "cache", fake_downloader())
+
+
+def test_unhashed_items_without_a_size_are_not_checked(tmp_path):
+    path = fetch(PrefetchItem("a.bin", URL), tmp_path / "dl", tmp_path / "cache", fake_downloader())
+    assert path.read_bytes() == DATA
+
+
+def test_tls_download_streams_to_the_file(tmp_path, monkeypatch):
+    import requests
+
+    from bigfix_actionscript_runner.prefetch import tls_download
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, size):
+            return [DATA[:3], DATA[3:]]
+
+    seen = {}
+
+    def get(url, **kw):
+        seen.update(kw, url=url)
+        return Response()
+
+    monkeypatch.setattr(requests, "get", get)
+    tls_download(URL, tmp_path / "out")
+    assert (tmp_path / "out").read_bytes() == DATA
+    assert seen["stream"] is True and "verify" not in seen  # certificates are checked

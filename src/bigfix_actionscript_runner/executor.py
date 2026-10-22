@@ -362,9 +362,9 @@ class Simulator:
         with tempfile.TemporaryDirectory(prefix="bfasr-prefetch-") as staging:
             try:
                 local = fetch(item, Path(staging), self.cache_dir, self.downloader)
-            except (PrefetchError, OSError) as e:
+            except PrefetchError as e:
                 raise LineError(str(e)) from e
-            except Exception as e:  # requests errors etc.
+            except Exception as e:  # network (OSError) and requests errors
                 raise LineError(f"download failed: {e}") from e
             try:
                 self.host.mkdir(download)

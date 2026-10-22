@@ -109,3 +109,34 @@ def test_crlf_is_normalized(tmp_path):
     p = tmp_path / "x.bas"
     p.write_bytes(b"delete a\r\ndelete b\r\n")
     assert load_action(p).script == "delete a\ndelete b\n"
+
+
+# --- malformed content -----------------------------------------------------------
+
+
+def test_invalid_xml(tmp_path):
+    with pytest.raises(LoadError, match="not valid XML"):
+        load_action(write(tmp_path, "x.bes", "<BES><Task>"))
+
+
+def test_bes_without_content(tmp_path):
+    with pytest.raises(LoadError, match="no Task, Fixlet or SingleAction"):
+        load_action(write(tmp_path, "x.bes", "<BES><Property/></BES>"))
+
+
+def test_single_action_without_actionscript(tmp_path):
+    with pytest.raises(LoadError, match="SingleAction has no ActionScript"):
+        load_action(
+            write(tmp_path, "x.bes", "<BES><SingleAction><Title>t</Title></SingleAction></BES>")
+        )
+
+
+def test_action_without_actionscript(tmp_path):
+    bes = "<BES><Task><Title>t</Title><DefaultAction ID='Action1'/></Task></BES>"
+    with pytest.raises(LoadError, match="Action1 has no ActionScript"):
+        load_action(write(tmp_path, "x.bes", bes))
+
+
+def test_fixlet_actions_load_like_task_actions(tmp_path):
+    a = load_action(write(tmp_path, "f.bes", TASK.replace("Task>", "Fixlet>")), "Action2")
+    assert a.script.strip() == "wait cmd /c echo two"

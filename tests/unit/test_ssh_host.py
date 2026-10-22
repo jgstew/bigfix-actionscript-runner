@@ -161,3 +161,29 @@ def test_windows_temp_dir_is_under_the_users_temp():
     )
     assert host.temp_dir("bfasr-") == "C:\\Users\\u\\AppData\\Local\\Temp\\bfasr-1a2b"
     assert "GetTempPath()" in runner.scripts[0] and "'bfasr-'" in runner.scripts[0]
+
+
+def test_timeouts_become_host_errors():
+    def respond(source, data):
+        raise TimeoutError(source)
+
+    host = SSHHost("u@h", runner=ScriptedRunner(respond), windows=False)
+    with pytest.raises(HostError, match="timed out after 3 seconds"):
+        host.run(["/bin/sleep", "9"], cwd="/tmp", wait=True, timeout=3)
+
+
+def test_a_garbled_hash_is_an_error():
+    host = SSHHost("u@h", runner=ScriptedRunner(lambda s, d: (b"", b"", 0)), windows=False)
+    with pytest.raises(HostError, match="can't hash"):
+        host.sha256("/x")
+
+
+def test_a_program_that_exits_127_by_itself_is_not_missing():
+    host = SSHHost("u@h", runner=ScriptedRunner(lambda s, d: (b"", b"oops", 127)), windows=False)
+    assert host.run(["/bin/prog"], cwd="/tmp", wait=True) == 127
+
+
+def test_windows_start_failures_are_host_errors():
+    host, _ = windows(lambda s, d: (b"", b"bfasr: This command cannot be run\r\n", 127))
+    with pytest.raises(HostError, match="can't run: This command cannot be run"):
+        host.run(["C:\\nope.exe"], cwd="C:\\", wait=True)
