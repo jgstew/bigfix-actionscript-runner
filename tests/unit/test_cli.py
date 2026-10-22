@@ -221,10 +221,13 @@ def test_relevance_flag_evaluates_the_items_relevance(tmp_path, fake):
 def test_help_has_plain_on_switches(fake):
     r = runner.invoke(cli.app, ["--help"])
     assert r.exit_code == 0
+    # Rich styles help in CI (GITHUB_ACTIONS / FORCE_COLOR), splitting "--execute"
+    # into "-" + escape codes + "-execute"; compare the plain text
+    text = re.sub(r"\x1b\[[0-9;]*m", "", r.output)
     for flag in ("--execute", "--no-download", "--no-preflight", "--relevance", "--json"):
-        assert flag in r.output
-    assert "--no-no-" not in r.output
-    assert "--no-execute" not in r.output
+        assert flag in text
+    assert "--no-no-" not in text
+    assert "--no-execute" not in text
 
 
 def test_load_error_exits_2(tmp_path, fake):
