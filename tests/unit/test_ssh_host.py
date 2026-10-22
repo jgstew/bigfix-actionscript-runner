@@ -30,6 +30,15 @@ def test_detects_windows_when_uname_fails():
     assert host.pure is PureWindowsPath
 
 
+@pytest.mark.parametrize(
+    "uname", [b"MINGW64_NT-10.0-20348\r\n", b"MSYS_NT-10.0\n", b"CYGWIN_NT-10.0\n"]
+)
+def test_detects_windows_with_a_unix_toolset_on_path(uname):
+    """Git for Windows puts a GNU uname on PATH, but the login shell is still cmd.exe."""
+    runner = ScriptedRunner(lambda s, d: (uname, b"", 0))
+    assert SSHHost("u@win", runner=runner).windows is True
+
+
 def test_name_is_the_destination():
     assert SSHHost("u@h", runner=ScriptedRunner(), windows=False).name == "u@h"
 

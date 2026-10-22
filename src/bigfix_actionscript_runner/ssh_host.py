@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 # program that itself exits 127
 _MARK = "bfasr:"
 
+_WINDOWS_UNAMES = (b"MINGW", b"MSYS", b"CYGWIN", b"WINDOWS")
+
 
 class CommandRunner(Protocol):
     """The slice of an SSH connection SSHHost uses. Raises TimeoutError on timeout."""
@@ -128,8 +130,10 @@ class SSHHost:
         self.become = become
         self._runner = runner if runner is not None else AsyncsshRunner(destination)
         if windows is None:
-            _, _, code = self._runner.run("uname -s")
-            windows = code != 0
+            out, _, code = self._runner.run("uname -s")
+            # Git for Windows / MSYS2 / Cygwin put a GNU uname on PATH, but the
+            # login shell is still cmd.exe (or PowerShell), so they are Windows
+            windows = code != 0 or out.strip().upper().startswith(_WINDOWS_UNAMES)
             logger.debug("%s is %s", destination, "Windows" if windows else "POSIX")
         self.windows = windows
 
