@@ -184,6 +184,7 @@ class Simulator:
             exit_code=self.exit_code,
             site_folder=self.sandbox.site,
             data_folder=self.sandbox.data,
+            download_folder=self.sandbox.resolve("__Download"),
         )
 
     def _eval(self, expr: str) -> list[str]:

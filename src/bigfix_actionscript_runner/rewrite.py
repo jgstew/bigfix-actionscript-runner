@@ -1,13 +1,20 @@
 """Rewrite action-only inspectors so qna (which has no action) can evaluate.
 
-`parameter "x"` becomes a string literal, `id of action` / `exit code of
-action` become numbers, and the client data folder and the current site's
-client folder point into the sandbox. Text inside string literals is left
-alone, and matching is case-insensitive like relevance itself.
+`parameter "x"` becomes a string literal, `exists parameter "x"` true or
+false, `id of action` / `exit code of action` numbers, and the client data
+folder, the current site's client folder and the download folder point into
+the sandbox. The work is client_context's, on the analyzer's parse tree; the
+regexes below are only the fallback for an expression the analyzer can't
+parse, so such an expression still gets the rewrites it always had.
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+from .client_context import ClientContext, relevance_string, simulate
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -17,11 +24,10 @@ class ActionContext:
     exit_code: int = 0
     site_folder: str = ""
     data_folder: str = ""
+    download_folder: str = ""
 
 
-def relevance_string(value: str) -> str:
-    """A relevance string literal: % and " are percent-escaped."""
-    return '"' + value.replace("%", "%25").replace('"', "%22") + '"'
+__all__ = ["ActionContext", "relevance_string", "rewrite"]
 
 
 # "of action" and "of active action" are the same action while it runs
@@ -53,6 +59,29 @@ def rewrite(expr: str, ctx: ActionContext, *, folders: bool = True) -> str:
 
     `folders=False` keeps the real client/site folder inspectors (for evaluating
     on a remote machine, which can't see the local sandbox).
+    """
+    simulated = simulate(
+        expr,
+        ClientContext(
+            parameters=ctx.parameters,
+            action_id=ctx.action_id,
+            exit_code=ctx.exit_code,
+            site_folder=ctx.site_folder if folders else None,
+            data_folder=ctx.data_folder if folders else None,
+            download_folder=(ctx.download_folder or None) if folders else None,
+        ),
+    )
+    if simulated.parse_error is None:
+        for u in simulated.unresolved:
+            # qna will most likely fail on these; the log says why
+            log.debug("not simulated: %s: %s (in %s)", u.text, u.reason, expr)
+        return simulated.text
+    log.debug("falling back to the regex rewrite (%s): %s", simulated.parse_error, expr)
+    return _rewrite_regex(expr, ctx, folders=folders)
+
+
+def _rewrite_regex(expr: str, ctx: ActionContext, *, folders: bool = True) -> str:
+    """The text-only rewrite, for an expression the analyzer can't parse.
 
     A string literal is everything from a `"` to the next `"`; in relevance a
     quote inside a string is written %22, so there are no escaped quotes.

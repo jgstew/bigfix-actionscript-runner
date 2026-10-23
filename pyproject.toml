@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigfix-actionscript-runner"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run BigFix ActionScript from a .bes file the way a client would: real client relevance substitution via qna, locally or over SSH, with the client folders sandboxed."
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -91,3 +91,15 @@ def test_active_action_and_plural_forms():
     assert rewrite("exit code of active action", ctx(exit_code=2)) == "2"
     assert rewrite("id of active action", ctx()) == "12345"
     assert rewrite('parameter "p" of active action', ctx(parameters={"p": "v"})) == '"v"'
+
+
+def test_an_expression_the_analyzer_cannot_parse_still_gets_the_regex_rewrite():
+    # an unfinished expression: qna will report the error, but with the value in it
+    assert rewrite('parameter "temp" &', ctx()) == '"/sb/__BESData/__Global/yara_php_scan" &'
+
+
+def test_unresolved_client_context_is_logged(caplog):
+    with caplog.at_level("DEBUG", logger="bigfix_actionscript_runner.rewrite"):
+        rewrite('parameter "nope"', ctx())
+    assert 'parameter "nope"' in caplog.text
+    assert "not set" in caplog.text

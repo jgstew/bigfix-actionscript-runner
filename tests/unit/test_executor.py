@@ -15,8 +15,9 @@ posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX paths on a POSIX 
 
 
 def fake_evaluator(answers=None, calls=None):
-    """String literals (what `parameter "x"` is rewritten to) evaluate to themselves;
-    anything else comes from `answers` (a value, a list, or an exception)."""
+    """String and boolean literals (what `parameter "x"` and `exists parameter "x"`
+    are rewritten to) evaluate to themselves; anything else comes from `answers`
+    (a value, a list, or an exception)."""
     answers = answers or {}
 
     def evaluate(expr):
@@ -25,6 +26,8 @@ def fake_evaluator(answers=None, calls=None):
         m = re.fullmatch(r'"([^"]*)"', expr)
         if m:
             return [m.group(1).replace("%22", '"').replace("%25", "%")]
+        if expr in ("true", "false") and expr not in answers:
+            return [expr.capitalize()]
         if expr not in answers:
             raise SubstitutionError(f"fake: no answer for {expr!r}")
         value = answers[expr]
@@ -325,6 +328,27 @@ def test_sandbox_relevance_goes_to_the_one_evaluator(tmp_path):
     sb, s = sim(tmp_path, {}, calls=calls)
     s.run('parameter "d" = "{pathname of data folder of client}"\n')
     assert calls == [f'pathname of folder "{sb.data}"']
+
+
+def test_unset_parameters_do_not_exist_without_a_set_answer(tmp_path):
+    # qna has no action: `exists parameter` is answered from the script's own parameters
+    _, s = sim(tmp_path)
+    r = s.run(
+        'if {not exists parameter "limit"}\nparameter "limit" = "10"\nendif\n'
+        'continue if {exists parameter "limit"}\n'
+    )
+    assert r.status == "completed"
+    assert s.parameters["limit"] == "10"
+
+
+def test_download_file_is_in_the_sandbox_download_folder(tmp_path):
+    calls = []
+    sb, s = sim(tmp_path, {}, calls=calls)
+    s.run(
+        'parameter "a" = "yr.tar.gz"\nparameter "p" = "{pathname of download file (parameter "a")}"\n'
+    )
+    download = Path(sb.site) / "__Download" / "yr.tar.gz"
+    assert calls == [f'pathname of file "{download}"']
 
 
 def test_run_does_not_wait_and_override_is_reset(tmp_path):

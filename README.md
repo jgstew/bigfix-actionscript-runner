@@ -188,11 +188,19 @@ always runs.
 - `parameter "x"` becomes the parameter's value (a string literal);
   `parameter "action issue date" of action` is the run's start time, in a
   client's format (`Wed, 22 Oct 2026 05:00:00 +0000`),
+- `exists parameter "x"` becomes `true` or `false`: whether it is set (by
+  the script so far, `--param`, or a built-in),
 - `id of action` and `exit code(s) of action` become numbers (the exit code of
   the last `wait`, or `--exit-code` when commands aren't run), with `of
   active action` too,
 - `data folder(s) of client` and `client folder(s) of current site` point
-  at the sandbox's folders (or the real ones with `--no-sandbox`).
+  at the sandbox's folders (or the real ones with `--no-sandbox`), and
+  `download folder` / `download file "x"` at its `__Download` folder.
+
+These are rewritten on bigfix-relevance-analyzer's parse tree, so text in
+string literals is never touched. Which inspectors need a running client is
+recorded from real `qna` runs in `tests/data/client_context/`; refresh it with
+`scripts/probe_client_context.py`.
 
 Before line 1 every distinct expression is evaluated once (the baseline),
 with `action parameter query` values already known (the operator answers
