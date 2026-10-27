@@ -39,6 +39,71 @@ Unmarked tests run offline on a bare machine. Tests marked `live_qna`,
 auto-skip without it (see `tests/conftest.py`). The SSH tests really change
 files on the target, so only point them at test machines.
 
+## Running against the inventory's machines
+
+The runner takes one target per run: `--ssh [USER@]HOST`, or none for this
+machine. It doesn't read an inventory, but the user's test machines are
+listed in the one
+[bigfix-remote-client-relevance](https://github.com/jgstew/bigfix-remote-client-relevance#inventory)
+uses: `remote_clients.toml`, the first found of
+
+1. `./remote_clients.toml`
+2. `~/.bigfix/remote_clients.toml` (under `sudo`, also `$SUDO_USER`'s)
+3. the all-users folder: `/Library/Application Support/bigfix` (macOS),
+   `/etc/xdg/bigfix` (Linux), `C:\ProgramData\bigfix` (Windows)
+
+It's the user's own config, outside this repo: read it, but don't edit it
+or copy its host names into the repo (tests and docs use placeholders like
+`admin@mac-test`).
+
+Each `[hosts.NAME]` table maps to runner flags like this; `[defaults]` keys
+apply to every host unless the host sets its own:
+
+| `transport` | Runner flags |
+|---|---|
+| `ssh` (the default when unset) | `--ssh USER@NAME` (`user` key; NAME is the table name: a host name, IP or `~/.ssh/config` alias), plus `--become` when `become = true` and the target is macOS or Linux. `--become` is POSIX-only, so leave it off for `platform = "windows"`. |
+| `local` | no target flag: this machine |
+| `container`, `fastquery`, `online_evaluator` | not usable: the runner needs a shell and a filesystem on the target, not just a relevance evaluator |
+
+Other keys:
+- **`qna_version`:** ignored. The runner uses whatever qna is installed on the target.
+- **`platform`/`arch`:** only tell you which `.bes` fits the machine, such as a
+  Windows Task for a Windows host.
+- **Port and key:** the runner has no flags for these, so set them in
+  `~/.ssh/config`. Host keys are always checked against `~/.ssh/known_hosts`,
+  even for a host with `verify_host_key = false` in the inventory.
+
+List the SSH hosts as runner flags (needs Python 3.11+ for `tomllib`, so use
+`uv run`):
+
+```bash
+uv run python - <<'EOF'
+import tomllib, pathlib
+inv = tomllib.loads(pathlib.Path("~/.bigfix/remote_clients.toml").expanduser().read_text())
+d = inv.get("defaults", {})
+for name, h in inv.get("hosts", {}).items():
+    h = {**d, **h}  # a host's own keys win over [defaults]
+    if h.get("transport", "ssh") == "ssh":  # ssh is the inventory's default transport
+        user = f"{h['user']}@" if h.get("user") else ""
+        become = " --become" if h.get("become") and h.get("platform") != "windows" else ""
+        print(f"{name}: --ssh {user}{name}{become}  # {h.get('platform', '?')}/{h.get('arch', '?')}")
+EOF
+```
+
+Then run on the matching machine. Dry run first, which changes nothing outside
+the sandbox, and add `--execute` only when the user asks for it, since these
+are real machines:
+
+```bash
+uv run bigfix-actionscript-runner path/to/task.bes --ssh admin@mac-test --become
+uv run bigfix-actionscript-runner path/to/task.bes --ssh admin@win-test
+```
+
+The SSH-marked tests take the same values from the environment:
+`BFASR_SSH_POSIX_HOST=USER@NAME` for a macOS or Linux host (plus
+`BFASR_SSH_BECOME=1` for macOS), and `BFASR_SSH_WINDOWS_HOST=USER@NAME` for a
+Windows one.
+
 ## How to work here
 
 - **Test first.** Write the failing test, run it and confirm it fails for
