@@ -3,6 +3,7 @@
 import hashlib
 import os
 import re
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -441,6 +442,147 @@ def test_download_now_happens_at_its_line(tmp_path):
     assert r.status == "completed"
     assert (Path(sb.site) / "__Download" / "n.bin").exists()
     assert [st.outcome for st in r.steps] == ["ok", "ok"]
+
+
+DATA_B = b"bbbbbbb"
+
+
+def prefetch_line(name, data, url):
+    sha1 = hashlib.sha1(data).hexdigest()
+    sha256 = hashlib.sha256(data).hexdigest()
+    return f"prefetch {name} sha1:{sha1} size:{len(data)} {url} sha256:{sha256}\n"
+
+
+def downloader_by_url(calls, contents):
+    def download(url, dest):
+        calls.append(url)
+        dest.write_bytes(contents[url])
+
+    return download
+
+
+@pytest.mark.parametrize(("cond", "taken"), [("False", "https://x/b"), ("True", "https://x/a")])
+def test_only_the_branch_that_runs_places_its_prefetch(tmp_path, cond, taken):
+    """Every top-level prefetch is downloaded before line 1, like a client's
+    cache, but only the one whose statement runs ends up in __Download (not
+    whichever same-name prefetch comes last in the file)."""
+    contents = {"https://x/a": DATA, "https://x/b": DATA_B}
+    calls = []
+    sb, s = sim(tmp_path, {"c": cond}, downloader=downloader_by_url(calls, contents))
+    r = s.run(
+        "if {c}\n"
+        + prefetch_line("a.txt", DATA, "https://x/a")
+        + "else\n"
+        + prefetch_line("a.txt", DATA_B, "https://x/b")
+        + "endif\n"
+    )
+    assert r.status == "completed", r.message
+    assert calls == ["https://x/a", "https://x/b"]
+    assert (Path(sb.site) / "__Download" / "a.txt").read_bytes() == contents[taken]
+    assert (r.staged, r.prefetched) == (["a.txt"], ["a.txt"])
+
+
+def test_a_name_placed_twice_is_listed_once(tmp_path):
+    _, s = sim(tmp_path, downloader=downloader([]))
+    line = f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n"
+    r = s.run(line + line)
+    assert r.status == "completed", r.message
+    assert (r.staged, r.prefetched) == (["a.zip"], ["a.zip"])
+
+
+def test_a_staged_prefetch_with_a_sha256_is_not_copied_again(tmp_path, monkeypatch):
+    """The download cache is keyed by sha256: staging points at it rather than
+    keeping a second copy of every platform's file until the run ends."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    seen = []
+
+    def runner(argv, **kw):
+        seen.extend(p for p in (tmp_path / "tmp").rglob("*") if p.is_file())
+        return 0
+
+    sb = Sandbox(tmp_path / "sb")
+    s = Simulator(
+        sb,
+        fake_evaluator(),
+        cache_dir=tmp_path / "cache",
+        downloader=downloader([]),
+        execute=True,
+        runner=runner,
+    )
+    r = s.run(f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\nwait x\n")
+    assert r.status == "completed", r.message
+    assert seen == []
+
+
+def test_a_cache_file_changed_after_staging_is_not_placed(tmp_path):
+    """The cache outlives the run (and is shared by runs), so what is placed is
+    checked against the hash verified when it was staged."""
+
+    def tamper(argv, **kw):
+        (tmp_path / "cache" / SHA256).write_bytes(b"evil!!!")
+        return 0
+
+    sb = Sandbox(tmp_path / "sb")
+    s = Simulator(
+        sb,
+        fake_evaluator(),
+        cache_dir=tmp_path / "cache",
+        downloader=downloader([]),
+        execute=True,
+        runner=tamper,
+    )
+    r = s.run(f"wait x\nprefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n")
+    assert (r.status, r.failed_line) == ("failed", 2)
+    assert "differs from the download" in r.message
+
+
+def test_a_prefetch_in_a_false_branch_is_staged_then_skipped(tmp_path):
+    sb, s = sim(tmp_path, {"1 = 2": "False"}, downloader=downloader([]))
+    r = s.run(
+        f"if {{1 = 2}}\nprefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\nendif\n"
+    )
+    assert r.status == "completed", r.message
+    assert not (Path(sb.site) / "__Download" / "a.zip").exists()
+    assert outcomes(r) == [(2, "prefetched"), (1, "ok"), (2, "skipped"), (3, "ok")]
+    assert "staged" in r.steps[0].detail
+    assert r.prefetched == []
+
+
+@pytest.mark.parametrize(("go", "placed"), [("yes", True), ("no", False)])
+def test_a_prefetch_guarded_by_a_parameter_set_earlier(tmp_path, go, placed):
+    """Like `prefetch catalog_download.bes` in the scanner task: the condition
+    can only be evaluated at its line, after the parameter is set."""
+    answers = {'"yes" = "yes"': "True", '"no" = "yes"': "False"}
+    sb, s = sim(tmp_path, answers, downloader=downloader([]))
+    r = s.run(
+        f'parameter "go" = "{go}"\n'
+        'if {parameter "go" = "yes"}\n'
+        f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n"
+        "endif\n"
+    )
+    assert r.status == "completed", r.message
+    assert (Path(sb.site) / "__Download" / "a.zip").exists() == placed
+    assert outcomes(r)[-2] == (3, "ok" if placed else "skipped")
+
+
+def test_a_prefetch_is_placed_only_when_its_line_runs(tmp_path):
+    _, s = sim(tmp_path, downloader=downloader([]))
+    r = s.run(
+        "copy __Download/a.zip got.zip\n"
+        f"prefetch a.zip sha1:{SHA1} size:7 https://x/a.zip sha256:{SHA256}\n"
+    )
+    assert (r.status, r.failed_line) == ("failed", 1)
+    assert "source does not exist" in r.message
+
+
+def test_a_prefetch_line_in_a_createfile_body_is_text(tmp_path):
+    calls = []
+    sb, s = sim(tmp_path, downloader=downloader(calls))
+    r = s.run(f"createfile until E\nprefetch a.zip sha1:{SHA1} size:7 https://x/a.zip\nE\n")
+    assert r.status == "completed", r.message
+    assert calls == [] and r.prefetched == []
+    assert (Path(sb.site) / "__createfile").read_text().startswith("prefetch a.zip")
 
 
 # --- baseline: every expression evaluated up front, then again at its step ---
@@ -935,6 +1077,21 @@ def test_if_with_a_brace_in_a_prefetch_block(tmp_path):
     )
     assert r.status == "completed", r.message
     assert calls == []
+
+
+def test_an_if_in_a_prefetch_block_is_a_step_with_its_own_evaluation(tmp_path):
+    _, s = sim(tmp_path, {"c": "False"}, downloader=downloader([]))
+    r = s.run(
+        "begin prefetch block\nif {c}\n"
+        f"add prefetch item name=a sha1={SHA1} size=7 url=https://x/a sha256={SHA256}\n"
+        "endif\nend prefetch block\n"
+        f"prefetch b.zip sha1:{SHA1} size:7 https://x/b.zip sha256:{SHA256}\n"
+    )
+    assert r.status == "completed", r.message
+    assert outcomes(r) == [(2, "ok"), (4, "ok"), (6, "prefetched"), (6, "ok")]
+    assert [e.expression for e in r.steps[0].evaluations] == ["c"]
+    assert r.steps[0].detail == "False"
+    assert r.steps[2].evaluations == []
 
 
 # --- parameters a client has before the first line --------------------------------

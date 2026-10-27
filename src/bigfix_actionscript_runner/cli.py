@@ -382,6 +382,7 @@ def _payload(
         "failed_line": report.failed_line if report else None,
         "message": report.message if report else "",
         "exit_code": report.exit_code if report else None,
+        "staged": report.staged if report else [],
         "prefetched": report.prefetched if report else [],
         "baseline": [asdict(b) for b in report.baseline] if report else [],
         "steps": [asdict(s) for s in report.steps] if report else [],

@@ -2,8 +2,9 @@
 
 Relevance substitution is real (through the evaluator); file commands act on
 the host, at the paths the sandbox maps them to; run/wait-style commands are
-shown, or run on the host with `execute=True`. Prefetch statements are handled
-in a pre-pass before line 1, like a client.
+shown, or run on the host with `execute=True`. Prefetches are downloaded in a
+pre-pass before line 1, like a client: prefetch block items are placed then,
+top-level `prefetch`/`download` statements only when their line runs.
 """
 
 import email.utils
@@ -17,7 +18,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .host import HostError
-from .prefetch import AUTO, Downloader, PrefetchError, PrefetchItem, fetch, parse_prefetch
+from .prefetch import (
+    AUTO,
+    Downloader,
+    PrefetchError,
+    PrefetchItem,
+    cached_copy,
+    fetch,
+    parse_prefetch,
+)
 from .rewrite import ActionContext, rewrite
 from .sandbox import Sandbox, SandboxEscape
 from .substitution import Evaluator, SubstitutionError, find_expressions, substitute
@@ -70,7 +79,10 @@ class Report:
     message: str = ""
     exit_code: int | None = None
     steps: list[Step] = field(default_factory=list)
+    staged: list[str] = field(default_factory=list)
+    """Names of top-level prefetches downloaded before line 1 (placed only if their line runs)."""
     prefetched: list[str] = field(default_factory=list)
+    """Names placed in __Download, each once."""
     baseline: list[BaselineEntry] = field(default_factory=list)
 
 
@@ -125,6 +137,18 @@ def _after(text: str, keyword: str) -> str:
     return text[len(keyword) :].strip()
 
 
+@dataclass(frozen=True)
+class _Staged:
+    """A prefetch downloaded and verified locally, not yet on the host."""
+
+    item: PrefetchItem
+    local: Path
+    sha256: str
+    """Of the file as verified: `local` may be the shared cache file, which
+    could change before it is placed."""
+    substituted: str
+
+
 @dataclass
 class _Frame:
     active: bool
@@ -172,6 +196,10 @@ class Simulator:
         self.baseline = baseline
         self._baseline: dict[str, BaselineEntry] = {}
         self._pending: list[Evaluation] = []
+        # only during run(): a temporary folder for staged files, and the
+        # top-level prefetches downloaded before line 1, by line index
+        self._staging: Path | None = None
+        self._staged: dict[int, _Staged] = {}
 
     # -- relevance ------------------------------------------------------------
 
@@ -239,7 +267,14 @@ class Simulator:
     # -- running --------------------------------------------------------------
 
     def run(self, script: str, first_line: int = 1) -> Report:
-        lines = script.split("\n")
+        with tempfile.TemporaryDirectory(prefix="bfasr-prefetch-") as staging:
+            self._staging = Path(staging)
+            try:
+                return self._run(script.split("\n"), first_line)
+            finally:
+                self._staging, self._staged = None, {}
+
+    def _run(self, lines: list[str], first_line: int) -> Report:
         report = Report()
         self._report = report
         if self.baseline:
@@ -262,7 +297,7 @@ class Simulator:
             active = not stack or stack[-1].active
             try:
                 try:
-                    i = self._line(text, lineno, lines, i, stack, active)
+                    i = self._line(text, lineno, lines, i - 1, stack, active)
                 except (HostError, SandboxEscape) as e:
                     raise LineError(str(e)) from e
             except LineError as e:
@@ -332,7 +367,14 @@ class Simulator:
             self.parameters = saved
 
     def _prefetch_pass(self, lines: list[str], first_line: int) -> set[int]:
-        """Download prefetch items before line 1. Returns line indexes it consumed."""
+        """Download prefetches before line 1. Returns the line indexes it consumed.
+
+        Prefetch blocks are run here, their `if`s included, and their items
+        placed. Top-level `prefetch`/`download` statements are only downloaded
+        and verified (staged): a client caches every one up front and copies
+        it into __Download when the statement runs, so only taken branches
+        place a file, and their conditions are evaluated at their line.
+        """
         handled: set[int] = set()
         in_block = False
         block_start = 0
@@ -366,12 +408,13 @@ class Simulator:
                     self._step(lineno, text, "failed", detail=str(e))
                     raise LineError(lineno, str(e)) from e
                 continue
-            if low.startswith("prefetch ") or (
-                low.startswith("download ") and not low.startswith("download now")
-            ):
-                handled.add(idx)
+            if _is_staged_prefetch(low):
                 try:
-                    self._fetch(self._sub(text), lineno, text)
+                    staged = self._staged[idx] = self._stage(self._sub(text))
+                    if staged.item.name not in self._report.staged:
+                        self._report.staged.append(staged.item.name)
+                    detail = f"staged ({self._detail(staged.item)})"
+                    self._step(lineno, text, "prefetched", staged.substituted, detail)
                 except LineError as e:
                     self._step(lineno, text, "failed", detail=str(e))
                     raise LineError(lineno, str(e)) from e
@@ -384,83 +427,108 @@ class Simulator:
     def _block_line(self, text: str, lineno: int, stack: list[_Frame]) -> None:
         low = text.lower()
         active = not stack or stack[-1].active
-        if _starts(low, "if"):
-            cond = active and self._bool(_after(text, "if"))
-            stack.append(_Frame(cond, cond or not active, active))
-        elif _starts(low, "elseif") or low in ("else", "endif"):
-            if not stack:
-                raise LineError(f"{low.split()[0]} without if")
-            top = stack[-1]
-            if low == "endif":
-                stack.pop()
-            elif low == "else":
-                top.active, top.taken = top.parent_active and not top.taken, True
-            else:
-                cond = top.parent_active and not top.taken and self._bool(_after(text, "elseif"))
-                top.active, top.taken = cond, top.taken or cond
-        elif active and low.startswith(("add prefetch item", "add nohash prefetch item")):
-            self._fetch(self._sub(text), lineno, text)
+        if self._control(text, lineno, stack, active):
+            return
+        if active and low.startswith(("add prefetch item", "add nohash prefetch item")):
+            self._place(self._stage(self._sub(text)), lineno, text, "prefetched")
         elif active:
             self._step(lineno, text, "warning", detail="not simulated in a prefetch block")
 
-    def _fetch(self, substituted: str, lineno: int, text: str) -> None:
+    def _control(self, text: str, lineno: int, stack: list[_Frame], active: bool) -> bool:
+        """Run an `if`/`elseif`/`else`/`endif` line against `stack` and record
+        its step; False for any other line.
+
+        Shared by the main pass and prefetch blocks. A condition is evaluated
+        only when its branch could run, so a false branch's relevance (and
+        everything nested in it) is never evaluated.
+        """
+        low = text.lower()
+        if _starts(low, "if"):
+            cond = active and self._bool(_after(text, "if"))
+            stack.append(_Frame(cond, cond or not active, active))
+            if active:
+                self._step(lineno, text, "ok", detail=str(cond))
+            else:
+                self._step(lineno, text, "skipped")
+            return True
+        if not (_starts(low, "elseif") or low in ("else", "endif")):
+            return False
+        if not stack:
+            raise LineError(f"{low.split()[0]} without if")
+        top = stack[-1]
+        if low == "endif":
+            stack.pop()
+        elif low == "else":
+            top.active, top.taken = top.parent_active and not top.taken, True
+        else:
+            cond = top.parent_active and not top.taken and self._bool(_after(text, "elseif"))
+            top.active, top.taken = cond, top.taken or cond
+        self._step(lineno, text, "ok")
+        return True
+
+    def _stage(self, substituted: str) -> _Staged:
+        """Download and verify a prefetch locally; nothing goes on the host yet."""
         try:
             item = parse_prefetch(substituted)
         except PrefetchError as e:
             raise LineError(str(e)) from e
         if item is None:
             raise LineError(f"can't parse prefetch/download statement: {substituted}")
+        if self._staging is None:
+            raise RuntimeError("prefetches are only staged during run()")
+        try:
+            # an item with a sha256 is used straight from the cache rather
+            # than kept twice; anything else gets a folder of its own, since
+            # two statements may prefetch the same name
+            local = (
+                None
+                if self.downloader is None
+                else cached_copy(item, self.cache_dir, self.downloader)
+            )
+            if local is None:
+                local = fetch(
+                    item, Path(tempfile.mkdtemp(dir=self._staging)), self.cache_dir, self.downloader
+                )
+        except PrefetchError as e:
+            raise LineError(str(e)) from e
+        except Exception as e:  # network (OSError) and requests errors
+            raise LineError(f"download failed: {e}") from e
+        return _Staged(item, local, hashlib.sha256(local.read_bytes()).hexdigest(), substituted)
+
+    def _place(self, staged: _Staged, lineno: int, text: str, outcome: str = "ok") -> None:
+        """Put a staged file in __Download on the host (like a relay handing a
+        client its prefetch), and check it where it landed against the hash
+        verified when it was staged."""
+        item, local = staged.item, staged.local
         download = self.sandbox.resolve("__Download")
         dest = str(self.host.pure(download, item.name))
-        # downloaded and verified here, then put on the host (like a relay
-        # handing a client its prefetch), and checked again where it landed
-        with tempfile.TemporaryDirectory(prefix="bfasr-prefetch-") as staging:
-            try:
-                local = fetch(item, Path(staging), self.cache_dir, self.downloader)
-            except PrefetchError as e:
-                raise LineError(str(e)) from e
-            except Exception as e:  # network (OSError) and requests errors
-                raise LineError(f"download failed: {e}") from e
-            try:
-                self.host.mkdir(download)
-                self.host.put_file(local, dest)
-                landed = self.host.sha256(dest)
-            except HostError as e:
-                raise LineError(f"can't put {item.name} on the target: {e}") from e
-            if landed != hashlib.sha256(local.read_bytes()).hexdigest():
-                raise LineError(f"{item.name}: SHA-256 on the target differs from the download")
-        self._report.prefetched.append(item.name)
-        detail = "placeholder" if self.downloader is None else _verified(item)
-        outcome = "ok" if item.now else "prefetched"
-        self._step(lineno, text, outcome, substituted, f"{self.sandbox.display(dest)} ({detail})")
+        try:
+            self.host.mkdir(download)
+            self.host.put_file(local, dest)
+            landed = self.host.sha256(dest)
+        except HostError as e:
+            raise LineError(f"can't put {item.name} on the target: {e}") from e
+        if landed != staged.sha256:
+            raise LineError(f"{item.name}: SHA-256 on the target differs from the download")
+        if item.name not in self._report.prefetched:
+            self._report.prefetched.append(item.name)
+        detail = f"{self.sandbox.display(dest)} ({self._detail(item)})"
+        self._step(lineno, text, outcome, staged.substituted, detail)
+
+    def _detail(self, item: PrefetchItem) -> str:
+        return "placeholder" if self.downloader is None else _verified(item)
 
     # -- one line ---------------------------------------------------------------
 
     def _line(
-        self, text: str, lineno: int, lines: list[str], i: int, stack: list[_Frame], active: bool
+        self, text: str, lineno: int, lines: list[str], idx: int, stack: list[_Frame], active: bool
     ) -> int:
+        """Run the line at index `idx`; returns the index of the next line to run."""
         low = text.lower()
+        i = idx + 1
 
         # control flow first: it decides whether anything else runs
-        if _starts(low, "if"):
-            cond = active and self._bool(_after(text, "if"))
-            stack.append(_Frame(cond, cond or not active, active))
-            self._step(
-                lineno, text, "ok" if active else "skipped", detail=str(cond) if active else ""
-            )
-            return i
-        if _starts(low, "elseif") or low == "else" or low == "endif":
-            if not stack:
-                raise LineError(f"{low.split()[0]} without if")
-            top = stack[-1]
-            if low == "endif":
-                stack.pop()
-            elif low == "else":
-                top.active, top.taken = top.parent_active and not top.taken, True
-            else:
-                cond = top.parent_active and not top.taken and self._bool(_after(text, "elseif"))
-                top.active, top.taken = cond, top.taken or cond
-            self._step(lineno, text, "ok")
+        if self._control(text, lineno, stack, active):
             return i
 
         if low.startswith(("createfile until ", "createfile until\t")):
@@ -607,8 +675,12 @@ class Simulator:
                 i += 1
             return i
 
+        if idx in self._staged:
+            self._place(self._staged[idx], lineno, text)
+            return i
+
         if low.startswith("download now"):
-            self._fetch(self._sub(text), lineno, text)
+            self._place(self._stage(self._sub(text)), lineno, text)
             return i
 
         cmd = low.split()[0]
@@ -711,6 +783,13 @@ def _requote(token: str, value: str) -> str:
 def split_win(command: str) -> list[str]:
     """Split a Windows command line on whitespace outside double quotes."""
     return re.findall(r'(?:"[^"]*"|[^\s"])+', command)
+
+
+def _is_staged_prefetch(low: str) -> bool:
+    """A top-level statement downloaded before line 1 and placed at its line."""
+    return low.startswith("prefetch ") or (
+        low.startswith("download ") and not low.startswith("download now")
+    )
 
 
 def _verified(item: PrefetchItem) -> str:

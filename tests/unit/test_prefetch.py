@@ -8,6 +8,7 @@ from bigfix_actionscript_runner.prefetch import (
     AUTO,
     PrefetchError,
     PrefetchItem,
+    cached_copy,
     fetch,
     parse_prefetch,
 )
@@ -93,6 +94,29 @@ def test_fetch_rejects_mismatches(tmp_path, field, value, message):
     with pytest.raises(PrefetchError, match=message):
         fetch(PrefetchItem(**kw), tmp_path / "dl", tmp_path / "cache", fake_downloader())
     assert not (tmp_path / "dl" / "a.tgz").exists()
+
+
+def test_cached_copy_is_the_cache_file_itself(tmp_path):
+    item = PrefetchItem("a.tgz", URL, 11, SHA1, SHA256)
+    calls = []
+    first = cached_copy(item, tmp_path / "cache", fake_downloader(calls=calls))
+    again = cached_copy(item, tmp_path / "cache", fake_downloader(calls=calls))
+    assert first == again == tmp_path / "cache" / SHA256
+    assert first.read_bytes() == DATA
+    assert calls == [URL]
+    assert [p.name for p in (tmp_path / "cache").iterdir()] == [SHA256]
+
+
+def test_cached_copy_is_none_without_a_sha256(tmp_path):
+    item = PrefetchItem("a.tgz", URL, 11, SHA1)
+    assert cached_copy(item, tmp_path / "cache", fake_downloader()) is None
+
+
+def test_cached_copy_rejects_a_mismatch_and_caches_nothing(tmp_path):
+    item = PrefetchItem("a.tgz", URL, 99, SHA1, SHA256)
+    with pytest.raises(PrefetchError, match="file_size does not match"):
+        cached_copy(item, tmp_path / "cache", fake_downloader())
+    assert list((tmp_path / "cache").iterdir()) == []
 
 
 def test_unhashed_download_is_not_cached(tmp_path):

@@ -219,9 +219,10 @@ client`). Give such an expression an answer with `--set`, which matches the
 whole expression as written in the action.
 
 An action gets the answers of the machine it runs on: a Linux task run on a
-Mac gets the Mac's answers (its prefetch `if` conditions are false, so
-nothing is downloaded). Use `--ssh` to a matching machine, or `--set` for
-individual expressions.
+Mac gets the Mac's answers (its Linux `if` conditions are false, so
+top-level prefetches in those branches are downloaded but never placed in
+`__Download`, and a prefetch block downloads nothing for them). Use `--ssh` to a matching machine, or
+`--set` for individual expressions.
 
 Prefetches with hashes are downloaded by bigfix-prefetch, whose download
 doesn't check TLS certificates (the hashes are checked afterwards). A
@@ -235,7 +236,7 @@ doesn't check TLS certificates (the hashes are checked afterwards). A
 | `createfile until`, `appendfile` | Written to the site folder, with `{{` as an escaped `{`. |
 | `copy`, `move`, `delete`, `folder create`, `folder delete` | At the paths the sandbox mode gives; `copy`/`move` fail if the source is missing or the destination exists. |
 | `if`/`elseif`/`else`/`endif`, `continue if`, `exit`, `pause while` | Evaluated; `pause while` only warns. |
-| `prefetch`, `add prefetch item`, `download`, `begin/end prefetch block` | Handled before line 1 (including `if` in the block); `download now` at its line. |
+| `prefetch`, `add prefetch item`, `download`, `begin/end prefetch block` | Prefetch blocks run before line 1, including the `if`s in them. Top-level `prefetch`/`download` statements are downloaded and verified before line 1, like a client's cache, and copied into `__Download` when the statement runs, so only taken branches place a file. `download now` at its line. In `--json`, `staged` lists the top-level prefetches downloaded before line 1 and `prefetched` the files placed in `__Download`. |
 | `run`, `wait`, `waithidden`, `runhidden`, `rundetached`, `dos`, `script`, `override` | Shown, or run with `--execute` from the site folder (with the `override` timeout). On Windows the arguments are passed exactly as written, for the program to parse, and `dos` runs through `cmd.exe /c`. |
 | `action uses wow64 redirection`, `action requires restart`, `setting`, `regset`, `regdelete`, `notify client`, `utility`, ... | Recorded, not performed. |
 | Anything else | A warning; the action continues. |

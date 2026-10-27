@@ -134,6 +134,7 @@ def test_json_report(tmp_path, fake):
     assert data["sandbox"] == str((tmp_path / "sb").resolve())
     assert any(s["outcome"] == "shown" for s in data["steps"])
     assert "preflight" in data
+    assert (data["staged"], data["prefetched"]) == ([], [])
 
 
 def test_ssh_target_and_options_reach_the_evaluator(tmp_path, fake):

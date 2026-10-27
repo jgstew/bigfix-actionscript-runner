@@ -9,7 +9,8 @@ Supported forms:
 and compared with bigfix-prefetch. A `download` with no hashes is fetched
 with TLS verification instead: bigfix-prefetch turns certificate checking
 off, which is safe only when hashes are checked afterwards. Verified
-downloads are cached by sha256 so repeat runs don't download them again.
+downloads are cached by sha256 so repeat runs don't download them again
+(`cached_copy` hands out the cached file itself).
 """
 
 import contextlib
@@ -179,23 +180,40 @@ def fetch(
     if downloader is None:
         dest.write_text(f"placeholder (not downloaded): {item.url}\n")
         return dest
-    if downloader is AUTO:
-        downloader = bigfix_prefetch_download if item.hashed else tls_download
-    cached = cache_dir / item.sha256 if item.sha256 else None
-    if cached is not None and cached.exists():
+    cached = cached_copy(item, cache_dir, downloader)
+    if cached is not None:
+        shutil.copyfile(cached, dest)
+        return dest
+    with tempfile.TemporaryDirectory(dir=dest_dir) as tmp:
+        shutil.move(_download(item, Path(tmp), downloader), dest)
+    return dest
+
+
+def cached_copy(item: PrefetchItem, cache_dir: Path, downloader: Downloader = AUTO) -> Path | None:
+    """The verified file in the cache for an item with a sha256, downloaded
+    into the cache first if it isn't there; None for an item without one."""
+    if not item.sha256:
+        return None
+    check_name(item.name)
+    cached = cache_dir / item.sha256
+    if cached.exists():
         try:
             _verify(item, cached)
         except PrefetchError:
             cached.unlink()  # damaged or tampered with: download it again
         else:
-            shutil.copyfile(cached, dest)
-            return dest
-    with tempfile.TemporaryDirectory(dir=dest_dir) as tmp:
-        part = Path(tmp) / item.name
-        downloader(item.url, part)
-        _verify(item, part)
-        if cached is not None:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(part, cached)
-        shutil.move(part, dest)
-    return dest
+            return cached
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=cache_dir) as tmp:
+        shutil.move(_download(item, Path(tmp), downloader), cached)
+    return cached
+
+
+def _download(item: PrefetchItem, tmp_dir: Path, downloader: Downloader) -> Path:
+    """Download `item` into tmp_dir and verify it; returns the file."""
+    if downloader is AUTO:
+        downloader = bigfix_prefetch_download if item.hashed else tls_download
+    part = tmp_dir / item.name
+    downloader(item.url, part)
+    _verify(item, part)
+    return part
