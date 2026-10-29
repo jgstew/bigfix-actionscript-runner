@@ -196,7 +196,7 @@ repos:
         # locally to get the online-only audits.
 
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: debc0da870202b8d569bb9b71b6b720ec7900c54 # 0.13.2
+    rev: eeca16c54e09b4d9a848259e46bae14737944348 # 0.13.5
     hooks:
       - id: uv-lock
       # uv-sync is a post-checkout/post-merge/post-rewrite hook, not a
