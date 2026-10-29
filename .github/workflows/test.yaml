@@ -9,8 +9,16 @@ on:
   workflow_call:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # In a workflow_call run the github context is the caller's, so
+  # github.workflow is "Tag and Release" there and "test" here. That keeps the
+  # release gate out of the group of this workflow's own push runs; the fixed
+  # "test" keeps it out of pre-commit.yaml's gate in the same release run,
+  # which shared one group (and cancelled it) before.
+  group: ${{ github.workflow }}-test-${{ github.ref }}
+  # Only this workflow's own runs cancel superseded ones. A release gate never
+  # does: tag_and_release.yaml's own concurrency already queues releases, and a
+  # cancelled gate silently skips the release.
+  cancel-in-progress: ${{ github.workflow == 'test' }}
 
 permissions:
   contents: read
