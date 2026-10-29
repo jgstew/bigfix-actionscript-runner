@@ -32,9 +32,10 @@ the action so its changes can be measured.
   (size, SHA-1, SHA-256), then put in the target's `__Download` and hashed
   again there.
 
-Once it is on PyPI (see below), it will run with
+It's on [PyPI](https://pypi.org/project/bigfix-actionscript-runner/), so it
+runs with
 `uvx bigfix-actionscript-runner "Scan for PHP Installs with YARA-X - macOS.bes"`.
-Until then, run it from a checkout:
+To run your own changes, run it from a checkout:
 
 ```bash
 uvx --from ~/Projects/bigfix-actionscript-runner bigfix-actionscript-runner path/to/task.bes
@@ -44,9 +45,19 @@ uvx --from ~/Projects/bigfix-actionscript-runner bigfix-actionscript-runner path
 code, add `--no-cache`, or use `uv run bigfix-actionscript-runner ...` inside
 the checkout.)
 
-pre-commit-bigfix isn't on PyPI yet, so it is a git dependency, and PyPI
-rejects packages with git dependencies: it needs publishing first
-([jgstew/pre-commit-bigfix#46](https://github.com/jgstew/pre-commit-bigfix/issues/46)).
+### Verifying a release
+
+Releases after 0.2.1 are signed three ways. 0.2.1 has the checksums only.
+
+- **Checksums:** each GitHub release has a `SHA256SUMS.txt`, also printed in
+  its notes. Check the downloaded files with `sha256sum -c SHA256SUMS.txt`.
+- **Build provenance:** each wheel and sdist has a GitHub artifact
+  attestation, and its Sigstore bundle
+  (`bigfix_actionscript_runner-<version>.sigstore.json`) is a release asset.
+  Check a file with
+  `gh attestation verify <file> --repo jgstew/bigfix-actionscript-runner`.
+- **PyPI:** the files on PyPI carry PEP 740 attestations from the same
+  workflow, shown as provenance on each file's page.
 
 ## Examples
 
