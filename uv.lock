@@ -133,7 +133,6 @@ wheels = [
 
 [[package]]
 name = "bigfix-actionscript-runner"
-version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncssh" },

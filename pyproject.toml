@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigfix-actionscript-runner"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Run BigFix ActionScript from a .bes file the way a client would: real client relevance substitution via qna, locally or over SSH, with the client folders sandboxed."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -61,6 +61,11 @@ Source   = "https://github.com/jgstew/bigfix-actionscript-runner"
 
 # --- Build backend ---------------------------------------------------------
 
+# `__version__` is the single source of truth: bump it there, and the build
+# and tag_and_release.yaml both read it from that file.
+[tool.hatch.version]
+path = "src/bigfix_actionscript_runner/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/bigfix_actionscript_runner"]
 
@@ -73,6 +78,11 @@ include = ["src", "tests", "README.md", "LICENSE"]
 
 [tool.uv]
 python-preference = "managed"
+# uv reinstalls the editable project only when a cache key changes, and the
+# default keys don't include the file the version now lives in; without it, a
+# bump would leave the installed metadata on the old version until a manual
+# `uv sync --reinstall-package`.
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/bigfix_actionscript_runner/__init__.py" }]
 # Supply-chain quarantine: ignore any distribution uploaded in the last 7
 # days, same as bigfix-remote-client-relevance. Overridable per run
 # (`--exclude-newer`) or per package (`exclude-newer-package`).

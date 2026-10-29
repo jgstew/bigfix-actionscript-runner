@@ -1,8 +1,8 @@
 ---
 # Tags and releases on a version bump. Nothing here bumps the version: the flow
-# is to change `[project] version` in pyproject.toml in a PR, merge it to main,
-# and this workflow does the rest (tag, build, checksums, GitHub Release, and -
-# once deliberately enabled, see the publish step - PyPI).
+# is to change `__version__` in src/bigfix_actionscript_runner/__init__.py in a
+# PR, merge it to main, and this workflow does the rest (tag, build, checksums,
+# GitHub Release, and - once deliberately enabled, see the publish step - PyPI).
 name: Tag and Release
 
 on:
@@ -46,15 +46,19 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      # `[project] version` in pyproject.toml is the single source of truth.
-      # tomllib is stdlib on the 3.11+ this package requires, and the runner's
-      # preinstalled python is new enough, so no setup-python step is needed.
-      - name: Read version from pyproject.toml
+      # `__version__` in the package's __init__.py is the single source of
+      # truth; pyproject.toml reads it from there via [tool.hatch.version].
+      # Importing the package runs only __init__.py, which imports nothing, so
+      # the runner's preinstalled python is enough with no install step.
+      # Only MAJOR.MINOR.PATCH, without leading zeros: already PEP 440 normal
+      # form, so the tag and the PyPI version match. tests/unit/test_version.py
+      # pins the same format.
+      - name: Read version from __init__.py
         id: getversion
         run: |
-          version="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-]?[0-9A-Za-z.]+)?$'; then
-            echo "::error::unexpected version string in pyproject.toml: '$version'"
+          version="$(PYTHONPATH=src python3 -c 'from bigfix_actionscript_runner import __version__; print(__version__)')"
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::unexpected version string in src/bigfix_actionscript_runner/__init__.py: '$version'"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
