@@ -92,19 +92,30 @@ jobs:
             echo "v${VERSION} has no tag yet - will release"
           fi
 
-  # The gate. Reusing the test workflow means the release is blocked by the
-  # exact same job that guards PRs, with no third-party wait-for-checks action
-  # and no polling. Lint/type-check are owned by pre-commit.yaml and are not
-  # waited on here - branch protection on main is what keeps those green.
+  # The gates. Reusing the test and pre-commit workflows means the release is
+  # blocked by the exact same jobs that guard PRs, with no third-party
+  # wait-for-checks action and no polling. Branch protection alone isn't
+  # enough: a direct push to main skips it, and v0.2.1 went out that way with
+  # pre-commit failing.
   test:
     name: Test
     needs: version
     if: needs.version.outputs.release_needed == 'true'
     uses: ./.github/workflows/test.yaml # zizmor: ignore[self-repository] -- ./ is the documented local reusable-workflow form
 
+  # The whole tree, not the pushed diff: a failure left by an earlier commit
+  # that didn't bump the version must still block the release that follows.
+  pre-commit:
+    name: pre-commit
+    needs: version
+    if: needs.version.outputs.release_needed == 'true'
+    uses: ./.github/workflows/pre-commit.yaml # zizmor: ignore[self-repository] -- ./ is the documented local reusable-workflow form
+    with:
+      all-files: true
+
   release:
     name: Tag and Release
-    needs: [version, test]
+    needs: [version, test, pre-commit]
     runs-on: ubuntu-latest
     # Deliberately gates the whole release - tag, GitHub release, and PyPI
     # upload - not just the publish step, so an environment protection rule

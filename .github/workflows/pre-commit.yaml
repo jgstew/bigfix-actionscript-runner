@@ -7,13 +7,25 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # lets tag_and_release.yaml gate the release on this same job via `uses:`,
+  # as it does with test.yaml
+  workflow_call:
+    inputs:
+      all-files:
+        description: check the whole tree, not just the pushed diff range
+        type: boolean
+        default: false
 
 # read-only by default
 permissions:
   contents: read
 
 concurrency:
-  group: pre-commit-${{ github.ref }}
+  # github.workflow, not a fixed name: in a workflow_call run the github
+  # context is the caller's, so this keeps the release gate's run in its own
+  # group instead of cancelling (or being cancelled by) the push-triggered run
+  # of this workflow for the same commit. Same as test.yaml.
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -88,8 +100,9 @@ jobs:
       - name: install uv (needed by the local pre-commit hooks)
         run: python -m pip install "uv==${UV_VERSION}"
 
+      # `inputs` is empty outside workflow_call, so all-files is false there
       - name: pre-commit local action test
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && !inputs.all-files
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: >-
@@ -98,12 +111,12 @@ jobs:
             --to-ref ${{ github.event.pull_request.head.sha || github.sha }}
             --hook-stage manual
 
-      # manual dispatch: run every hook (including the manual-stage ones -
-      # validate-pyproject, the pytest wrapper, the check-useless-excludes/
-      # check-hooks-apply meta hooks) against the full tree, not just the
-      # diff range a PR/push would use
-      - name: pre-commit local action test (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
+      # manual dispatch or the release gate: run every hook (including the
+      # manual-stage ones - validate-pyproject, the pytest wrapper, the
+      # check-useless-excludes/check-hooks-apply meta hooks) against the full
+      # tree, not just the diff range a PR/push would use
+      - name: pre-commit local action test (full tree)
+        if: github.event_name == 'workflow_dispatch' || inputs.all-files
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --color=always --all-files --hook-stage manual

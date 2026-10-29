@@ -36,7 +36,10 @@ def workflow_version_code() -> str:
 def test_installed_metadata_matches_dunder_version():
     # hatch builds [project] version from __init__.py, so they agree by
     # construction; a mismatch means a stale editable install (see cache-keys)
-    assert importlib.metadata.version("bigfix-actionscript-runner") == bigfix_actionscript_runner.__version__
+    assert (
+        importlib.metadata.version("bigfix-actionscript-runner")
+        == bigfix_actionscript_runner.__version__
+    )
 
 
 def read_version_bare(code: str) -> str:
@@ -73,7 +76,20 @@ def test_version_format_accepts(version):
 
 @pytest.mark.parametrize(
     "version",
-    ["0.3", "1.2.3.4", "v1.2.3", "01.2.3", "1.02.3", "1.2.03", "1.2.3rc1", "1.2.3-rc1", "1.2.3.post1", "1.2.3+local", "1.2.3\n", "１.2.3"],
+    [
+        "0.3",
+        "1.2.3.4",
+        "v1.2.3",
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        "1.2.3rc1",
+        "1.2.3-rc1",
+        "1.2.3.post1",
+        "1.2.3+local",
+        "1.2.3\n",
+        "１.2.3",
+    ],
 )
 def test_version_format_rejects(version):
     assert not VERSION_FORMAT.fullmatch(version)
@@ -89,7 +105,10 @@ def test_version_is_set_only_in_dunder_version():
     project = PYPROJECT["project"]
     assert "version" not in project
     assert project["dynamic"] == ["version"]
-    assert PYPROJECT["tool"]["hatch"]["version"]["path"] == "src/bigfix_actionscript_runner/__init__.py"
+    assert (
+        PYPROJECT["tool"]["hatch"]["version"]["path"]
+        == "src/bigfix_actionscript_runner/__init__.py"
+    )
 
 
 def test_no_direct_url_dependencies():
@@ -97,5 +116,7 @@ def test_no_direct_url_dependencies():
     # which only runs once PYPI_PUBLISH is on, so it catches a `pkg @ git+...`
     # in the PR instead of mid-release. PyPI rejects them in extras too.
     project = PYPROJECT["project"]
-    published = project["dependencies"] + [d for extra in project.get("optional-dependencies", {}).values() for d in extra]
+    published = project["dependencies"] + [
+        d for extra in project.get("optional-dependencies", {}).values() for d in extra
+    ]
     assert [d for d in published if " @ " in d] == []
